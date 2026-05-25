@@ -71,14 +71,7 @@ DEMO_TRADES = [
         "price": 23847.5, "confidence": 82, "score": 6,
         "rsi": 38.4, "ema9": 23812.0, "ema21": 23798.0,
         "macd": 14.2, "vol_r": 1.6, "vwap": 23830.0, "atr": 45.0,
-        "reasons": [
-            "RSI Oversold (38.4)",
-            "EMA Bullish + Price above EMA9",
-            "MACD Positive (14.2)",
-            "Price above VWAP (23830.0)",
-            "Volume Surge 1.6x",
-            "3 Bullish Candles",
-        ],
+      
         "demo": True,
     },
     {
@@ -87,13 +80,7 @@ DEMO_TRADES = [
         "price": 51523.0, "confidence": 78, "score": 5,
         "rsi": 64.7, "ema9": 51540.0, "ema21": 51560.0,
         "macd": -22.5, "vol_r": 1.8, "vwap": 51550.0, "atr": 88.0,
-        "reasons": [
-            "RSI Overbought (64.7)",
-            "EMA Bearish + Price below EMA9",
-            "MACD Negative (-22.5)",
-            "Price below VWAP (51550.0)",
-            "Volume Surge 1.8x",
-        ],
+        
         "demo": True,
     },
     {
@@ -102,12 +89,7 @@ DEMO_TRADES = [
         "price": 78412.0, "confidence": 75, "score": 4,
         "rsi": 42.1, "ema9": 78390.0, "ema21": 78370.0,
         "macd": 8.9, "vol_r": 1.4, "vwap": 78395.0, "atr": 120.0,
-        "reasons": [
-            "RSI Neutral-Low (42.1)",
-            "EMA Bullish + Price above EMA9",
-            "MACD Positive (8.9)",
-            "Volume Surge 1.4x",
-        ],
+        
         "demo": True,
     },
 ]
@@ -325,15 +307,7 @@ def format_alert(sig: dict) -> str:
         f"🛑 <b>Stop Loss:</b> ₹{sig['sl']}\n"
         f"✅ <b>Target:</b> ₹{sig['target']}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>Analysis:</b>\n"
-        f"  Spot: ₹{sig['price']} | RSI: {sig['rsi']}\n"
-        f"  EMA9: {sig['ema9']} | VWAP: {sig['vwap']}\n"
-        f"  Vol: {sig['vol_r']}x | Score: {sig['score']}/8\n\n"
-        f"📝 <b>Reasons:</b>\n{reasons_s}\n\n"
-        f"🎯 Confidence: {sig['confidence']}%\n"
-        f"🕐 {now} IST\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚠️ <i>Educational purpose only.</i>"
+      
     )
 
 
@@ -492,7 +466,7 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         mkt = "🟢 OPEN" if is_market_open() else "🔴 CLOSED"
         now = datetime.now(IST).strftime("%I:%M %p IST")
         await wait.edit_text(
-            f"⚪ <b>Koi signal nahi mila</b>\n\n"
+            f"⚪ <b>NO ANY SIGNAL FOUND</b>\n\n"
             f"Market: {mkt} | {now}\n\n"
             f"Reasons:\n"
             f"• Market sideways — clear trend nahi\n"
