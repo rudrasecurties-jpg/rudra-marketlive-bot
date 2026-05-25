@@ -306,6 +306,7 @@ def analyze_index(name: str, cfg: dict) -> list[dict]:
 # MESSAGE FORMAT
 # ══════════════════════════════════════════════════════════════════════════════
 def format_alert(sig: dict) -> str:
+    now   = datetime.now(IST).strftime("%d %b %Y | %I:%M %p")
     arrow = "📈" if sig["direction"] == "CE" else "📉"
     demo_line = "\n🔸 [DEMO TRADE — Real nahi hai]" if sig.get("demo") else ""
 
@@ -316,25 +317,24 @@ def format_alert(sig: dict) -> str:
         "╚══════════════════════════╝"
     )
 
-    body = (
+    trade_info = (
         f"{demo_line}\n"
         f"{arrow} Index: {sig['name']}\n"
         f"📌 Type: {sig['direction']}\n"
         f"💰 Entry Price: ₹{sig['entry']}\n"
         f"🎯 Strike: {sig['strike']}\n"
         f"🛑 Stop Loss: ₹{sig['sl']}\n"
-        f"✅ Target: ₹{sig['target']}"
+        f"✅ Target: ₹{sig['target']}\n"
     )
+
     footer = (
         f"🎯 Confidence: {sig['confidence']}%\n"
         f"🕐 {now} IST\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚠️ <i>Educational purpose only.</i>"
+        f"⚠️ Educational purpose only."
     )
 
-    return header + "\n" + body
-
-
+    return header + "\n" + trade_info + "\n" + footer
 # ══════════════════════════════════════════════════════════════════════════════
 # CHANNEL POST
 # ══════════════════════════════════════════════════════════════════════════════
