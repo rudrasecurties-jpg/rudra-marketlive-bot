@@ -305,36 +305,28 @@ def analyze_index(name: str, cfg: dict) -> list[dict]:
 # ══════════════════════════════════════════════════════════════════════════════
 # MESSAGE FORMAT
 # ══════════════════════════════════════════════════════════════════════════════
-
 def format_alert(sig: dict) -> str:
-    now   = datetime.now(IST).strftime("%d %b %Y | %I:%M %p")
     arrow = "📈" if sig["direction"] == "CE" else "📉"
-    demo_tag = "\n🔸 <b>[DEMO TRADE — Real nahi hai]</b>" if sig.get("demo") else ""
-    reasons_s = "\n".join(f"  ✅ {r}" for r in sig["reasons"])
+    demo_line = "\n🔸 [DEMO TRADE — Real nahi hai]" if sig.get("demo") else ""
 
-    return (
-        f"╔══════════════════════════╗\n"
-        f"   🔔 RUDRA SECURITIES\n"
-        f"       TRADING ALERT\n"
-        f"╚══════════════════════════╝\n"
-        f"{demo_tag}\n"
-        f"{arrow} <b>Index:</b> {sig['name']}\n"
-        f"📌 <b>Type:</b> {sig['direction']}\n"
-        f"💰 <b>Entry Price:</b> ₹{sig['entry']}\n"
-        f"🎯 <b>Strike:</b> {sig['strike']}\n"
-        f"🛑 <b>Stop Loss:</b> ₹{sig['sl']}\n"
-        f"✅ <b>Target:</b> ₹{sig['target']}\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>Analysis:</b>\n"
-        f"  Spot: ₹{sig['price']} | RSI: {sig['rsi']}\n"
-        f"  EMA9: {sig['ema9']} | VWAP: {sig['vwap']}\n"
-        f"  Vol: {sig['vol_r']}x | Score: {sig['score']}/8\n\n"
-        f"📝 <b>Reasons:</b>\n{reasons_s}\n\n"
-        f"🎯 Confidence: {sig['confidence']}%\n"
-        f"🕐 {now} IST\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚠️ <i>Educational purpose only.</i>"
+    header = (
+        "╔══════════════════════════╗\n"
+        "   🔔 RUDRA SECURITIES\n"
+        "       TRADING ALERT\n"
+        "╚══════════════════════════╝"
     )
+
+    body = (
+        f"{demo_line}\n"
+        f"{arrow} Index: {sig['name']}\n"
+        f"📌 Type: {sig['direction']}\n"
+        f"💰 Entry Price: ₹{sig['entry']}\n"
+        f"🎯 Strike: {sig['strike']}\n"
+        f"🛑 Stop Loss: ₹{sig['sl']}\n"
+        f"✅ Target: ₹{sig['target']}"
+    )
+
+    return header + "\n" + body
 
 
 # ══════════════════════════════════════════════════════════════════════════════
