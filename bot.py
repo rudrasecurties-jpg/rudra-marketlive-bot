@@ -324,6 +324,10 @@ def format_alert(sig: dict) -> str:
         f"🎯 Strike: {sig['strike']}\n"
         f"🛑 Stop Loss: ₹{sig['sl']}\n"
         f"✅ Target: ₹{sig['target']}"
+        f"🎯 Confidence: {sig['confidence']}%\n"
+        f"🕐 {now} IST\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚠️ <i>Educational purpose only.</i>"
     )
 
     return header + "\n" + body
