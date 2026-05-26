@@ -1,12 +1,12 @@
 """
-RUDRA SECURITIES — Indian Market Signal Bot v5.1
+RUDRA SECURITIES — Indian Market Signal Bot v5.3
 
-Changes v5.1:
-  • Pre-Market Update every 09:10 AM IST (NIFTY, BANKNIFTY, SENSEX)
-  • NIFTY Expected Opening via GIFT NIFTY
-  • Alert format simplified (only trade info + confidence + time + disclaimer)
-  • /test demo trade private + channel dono mein
-  • All commands work perfectly in private chat
+Changes v5.3:
+  • Auto scan interval reduced from 3 min → 1 min
+  • Score threshold = 2 (relaxed)
+  • Cooldown = 10 min per index+direction
+  • Pre-Market Update daily 09:10 AM IST
+  • Simplified alert format
 """
 
 import logging, os, threading, asyncio
@@ -64,7 +64,7 @@ INDICES = {
     },
 }
 
-# Demo trades — /test command ke liye realistic data
+# Demo trades
 DEMO_TRADES = [
     {
         "name": "NIFTY", "direction": "CE",
@@ -72,14 +72,7 @@ DEMO_TRADES = [
         "price": 23847.5, "confidence": 82, "score": 6,
         "rsi": 38.4, "ema9": 23812.0, "ema21": 23798.0,
         "macd": 14.2, "vol_r": 1.6, "vwap": 23830.0, "atr": 45.0,
-        "reasons": [
-            "RSI Oversold (38.4)",
-            "EMA Bullish + Price above EMA9",
-            "MACD Positive (14.2)",
-            "Price above VWAP (23830.0)",
-            "Volume Surge 1.6x",
-            "3 Bullish Candles",
-        ],
+        "reasons": ["RSI Oversold", "EMA Bullish", "MACD Positive"],
         "demo": True,
     },
     {
@@ -88,13 +81,7 @@ DEMO_TRADES = [
         "price": 51523.0, "confidence": 78, "score": 5,
         "rsi": 64.7, "ema9": 51540.0, "ema21": 51560.0,
         "macd": -22.5, "vol_r": 1.8, "vwap": 51550.0, "atr": 88.0,
-        "reasons": [
-            "RSI Overbought (64.7)",
-            "EMA Bearish + Price below EMA9",
-            "MACD Negative (-22.5)",
-            "Price below VWAP (51550.0)",
-            "Volume Surge 1.8x",
-        ],
+        "reasons": ["RSI Overbought", "EMA Bearish", "MACD Negative"],
         "demo": True,
     },
     {
@@ -103,12 +90,7 @@ DEMO_TRADES = [
         "price": 78412.0, "confidence": 75, "score": 4,
         "rsi": 42.1, "ema9": 78390.0, "ema21": 78370.0,
         "macd": 8.9, "vol_r": 1.4, "vwap": 78395.0, "atr": 120.0,
-        "reasons": [
-            "RSI Neutral-Low (42.1)",
-            "EMA Bullish + Price above EMA9",
-            "MACD Positive (8.9)",
-            "Volume Surge 1.4x",
-        ],
+        "reasons": ["RSI Neutral-Low", "EMA Bullish", "MACD Positive"],
         "demo": True,
     },
 ]
@@ -188,7 +170,7 @@ def vwap_val(df: pd.DataFrame) -> float:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SIGNAL ENGINE
+# SIGNAL ENGINE (score threshold = 2, cooldown = 10 min)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def analyze_index(name: str, cfg: dict) -> list[dict]:
@@ -220,12 +202,19 @@ def analyze_index(name: str, cfg: dict) -> list[dict]:
     macd_v = macd_hist(close)
     vol_r  = vol_ratio(volume)
     vwap_v = vwap_val(df)
+
     c1, c2, c3 = close.iloc[-1], close.iloc[-2], close.iloc[-3]
     mom_up   = c1 > c2 > c3
     mom_down = c1 < c2 < c3
 
+    c5 = close.iloc[-5] if len(close) >= 5 else close.iloc[0]
+    pct_5min = ((c1 - c5) / c5) * 100 if c5 != 0 else 0
+
+    ema_bullish = ema9_v > ema21_v
+    ema_bearish = ema9_v < ema21_v
+
     log.info(f"{name} | Price={price} RSI={rsi_v} EMA9={ema9_v} EMA21={ema21_v} "
-             f"MACD={macd_v} VolR={vol_r} VWAP={vwap_v}")
+             f"MACD={macd_v} VolR={vol_r} VWAP={vwap_v} 5min%={r2(pct_5min)}%")
 
     results = []
     for direction in ["CE", "PE"]:
@@ -233,45 +222,57 @@ def analyze_index(name: str, cfg: dict) -> list[dict]:
         score = 0
         reasons = []
 
+        # RSI
         if bull:
-            if rsi_v < 35:    score += 2; reasons.append(f"RSI Oversold ({rsi_v})")
-            elif rsi_v < 45:  score += 1; reasons.append(f"RSI Neutral-Low ({rsi_v})")
+            if rsi_v < 40:    score += 2; reasons.append(f"RSI Oversold ({rsi_v})")
+            elif rsi_v < 50:  score += 1; reasons.append(f"RSI Low ({rsi_v})")
         else:
-            if rsi_v > 65:    score += 2; reasons.append(f"RSI Overbought ({rsi_v})")
-            elif rsi_v > 55:  score += 1; reasons.append(f"RSI Neutral-High ({rsi_v})")
+            if rsi_v > 60:    score += 2; reasons.append(f"RSI Overbought ({rsi_v})")
+            elif rsi_v > 50:  score += 1; reasons.append(f"RSI High ({rsi_v})")
 
-        if bull:
-            if ema9_v > ema21_v and price > ema9_v:
-                score += 2; reasons.append("EMA Bullish + Price above EMA9")
-            elif price > ema21_v:
-                score += 1; reasons.append("Price above EMA21")
-        else:
-            if ema9_v < ema21_v and price < ema9_v:
-                score += 2; reasons.append("EMA Bearish + Price below EMA9")
-            elif price < ema21_v:
-                score += 1; reasons.append("Price below EMA21")
+        # EMA
+        if bull and ema_bullish:
+            if price > ema9_v:
+                score += 2; reasons.append("EMA Bullish + Price > EMA9")
+            else:
+                score += 1; reasons.append("EMA Bullish")
+        elif not bull and ema_bearish:
+            if price < ema9_v:
+                score += 2; reasons.append("EMA Bearish + Price < EMA9")
+            else:
+                score += 1; reasons.append("EMA Bearish")
 
+        # MACD
         if bull and macd_v > 0:
             score += 1; reasons.append(f"MACD Positive ({macd_v})")
         elif not bull and macd_v < 0:
             score += 1; reasons.append(f"MACD Negative ({macd_v})")
 
+        # VWAP
         if bull and price > vwap_v:
-            score += 1; reasons.append(f"Price above VWAP ({vwap_v})")
+            score += 1; reasons.append(f"Price > VWAP ({vwap_v})")
         elif not bull and price < vwap_v:
-            score += 1; reasons.append(f"Price below VWAP ({vwap_v})")
+            score += 1; reasons.append(f"Price < VWAP ({vwap_v})")
 
-        if vol_r >= 1.3:
-            score += 1; reasons.append(f"Volume Surge {vol_r}x")
+        # Volume
+        if vol_r >= 1.2:
+            score += 1; reasons.append(f"Volume {vol_r}x")
 
+        # 3-candle momentum
         if bull and mom_up:
-            score += 1; reasons.append("3 Bullish Candles")
+            score += 2; reasons.append("3 Bullish Candles ↑")
         elif not bull and mom_down:
-            score += 1; reasons.append("3 Bearish Candles")
+            score += 2; reasons.append("3 Bearish Candles ↓")
 
-        log.info(f"  {name} {direction}: score={score}/8 | reasons={len(reasons)}")
+        # 5-candle momentum
+        if bull and pct_5min > 0.15:
+            score += 1; reasons.append(f"+{r2(pct_5min)}% in 5min")
+        elif not bull and pct_5min < -0.15:
+            score += 1; reasons.append(f"{r2(pct_5min)}% in 5min")
 
-        if score < 3:
+        log.info(f"  {name} {direction}: score={score}/10 | reasons={len(reasons)}")
+
+        if score < 2:
             continue
 
         strike = nearest_strike(price, cfg["step"])
@@ -279,14 +280,14 @@ def analyze_index(name: str, cfg: dict) -> list[dict]:
         entry  = int(round(prem / 5) * 5)
         target = entry + cfg["target_pts"]
         sl     = entry - cfg["sl_pts"]
-        conf   = min(92, 50 + score * 6)
+        conf   = min(92, 45 + score * 7)
 
         key  = f"{name}_{direction}"
         last = last_signal.get(key)
         if last:
             diff = (datetime.now(IST) - last).total_seconds()
-            if diff < 900:
-                log.info(f"Duplicate skip: {key} ({int(diff)}s)")
+            if diff < 600:  # 10 min cooldown
+                log.info(f"Cooldown skip: {key} ({int(diff)}s)")
                 continue
         last_signal[key] = datetime.now(IST)
 
@@ -304,7 +305,7 @@ def analyze_index(name: str, cfg: dict) -> list[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MESSAGE FORMAT (simplified with confidence + time + disclaimer)
+# MESSAGE FORMAT
 # ══════════════════════════════════════════════════════════════════════════════
 
 def format_alert(sig: dict) -> str:
@@ -357,26 +358,20 @@ async def post_to_channel(bot, sig: dict) -> bool:
         return True
     except Exception as e:
         log.error(f"❌ Channel post FAIL: {e}")
-        log.error(f"   CHANNEL_ID='{CHANNEL_ID}' — Format check karo (@channel ya -100xxx)")
         return False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PRE‑MARKET UPDATE (Daily 09:10 AM IST)
+# PRE‑MARKET UPDATE
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def pre_market_post(ctx: ContextTypes.DEFAULT_TYPE):
-    """
-    Daily 09:10 AM IST – Kal ka open/close/gap for NIFTY, BANKNIFTY, SENSEX
-    + NIFTY Expected Opening via GIFT NIFTY
-    """
     if not CHANNEL_ID:
-        log.warning("Pre-market: CHANNEL_ID nahi hai")
         return
 
     today = datetime.now(IST)
     if today.weekday() >= 5:
-        return  # Saturday/Sunday skip
+        return
 
     try:
         lines = [
@@ -388,105 +383,86 @@ async def pre_market_post(ctx: ContextTypes.DEFAULT_TYPE):
             ""
         ]
 
-        # Process each index
         for name, cfg in INDICES.items():
             try:
                 df = yf.download(cfg["yf"], period="5d", interval="1d",
                                  progress=False, auto_adjust=True)
                 if df is None or len(df) < 3:
-                    lines.append(f"⚠️ {name}: Data unavailable")
                     continue
-
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.get_level_values(0)
 
                 close_s = df["Close"].squeeze()
                 open_s  = df["Open"].squeeze()
 
-                yesterday_close = round(float(close_s.iloc[-2]), 2)
-                yesterday_open  = round(float(open_s.iloc[-2]), 2)
-                prev_close      = round(float(close_s.iloc[-3]), 2)
-                gap = round(yesterday_open - prev_close, 2)
-                dir_emoji = "🟢" if gap > 0 else "🔴" if gap < 0 else "⚪"
+                yc = round(float(close_s.iloc[-2]), 2)
+                yo = round(float(open_s.iloc[-2]), 2)
+                pc = round(float(close_s.iloc[-3]), 2)
+                gap = round(yo - pc, 2)
+                emoji = "🟢" if gap > 0 else "🔴" if gap < 0 else "⚪"
 
                 lines.append(f"━━━ {name} ━━━")
-                lines.append(f"   Open:  {yesterday_open:,.2f}")
-                lines.append(f"   Close: {yesterday_close:,.2f}")
-                lines.append(f"   Gap:   {dir_emoji} {gap:+} pts (vs prev close)")
+                lines.append(f"   Open:  {yo:,.2f}")
+                lines.append(f"   Close: {yc:,.2f}")
+                lines.append(f"   Gap:   {emoji} {gap:+} pts")
                 lines.append("")
             except Exception as e:
-                log.error(f"Pre-market {name} error: {e}")
-                lines.append(f"⚠️ {name}: Error fetching data")
-                lines.append("")
+                log.error(f"Pre-market {name}: {e}")
 
-        # GIFT NIFTY expected opening (only for NIFTY)
+        # GIFT NIFTY
         try:
             gift = yf.Ticker("^GIFNIFTY")
             info = gift.info
-            gift_price = info.get("regularMarketPrice") or info.get("previousClose")
-            if gift_price is not None:
-                gift_price = round(float(gift_price), 2)
-                # Use NIFTY yesterday close (last known) for expected gap
-                nifty_yc = None
-                for i, line in enumerate(lines):
-                    if "NIFTY" in line and i+3 < len(lines):
-                        # extract close from previous block (yesterday_close)
-                        pass
-                # Safer: fetch NIFTY's yesterday close again
-                nifty_df = yf.download("^NSEI", period="3d", interval="1d",
-                                       progress=False, auto_adjust=True)
-                if nifty_df is not None and len(nifty_df) >= 2:
-                    if isinstance(nifty_df.columns, pd.MultiIndex):
-                        nifty_df.columns = nifty_df.columns.get_level_values(0)
-                    nifty_yc = round(float(nifty_df["Close"].squeeze().iloc[-2]), 2)
-                    expected_gap = round(gift_price - nifty_yc, 2)
-                    exp_emoji = "🟢" if expected_gap > 0 else "🔴" if expected_gap < 0 else "⚪"
-                    lines.append("━━━ Today's Expected Opening (NIFTY) ━━━")
-                    lines.append(f"   GIFT NIFTY: {gift_price}")
-                    lines.append(f"   Expected Gap: {exp_emoji} {expected_gap:+} pts")
+            gp = info.get("regularMarketPrice") or info.get("previousClose")
+            if gp:
+                gp = round(float(gp), 2)
+                ndf = yf.download("^NSEI", period="3d", interval="1d",
+                                  progress=False, auto_adjust=True)
+                if ndf is not None and len(ndf) >= 2:
+                    if isinstance(ndf.columns, pd.MultiIndex):
+                        ndf.columns = ndf.columns.get_level_values(0)
+                    nyc = round(float(ndf["Close"].squeeze().iloc[-2]), 2)
+                    egap = round(gp - nyc, 2)
+                    eemoji = "🟢" if egap > 0 else "🔴" if egap < 0 else "⚪"
+                    lines.append("━━━ Today's Expected (NIFTY) ━━━")
+                    lines.append(f"   GIFT NIFTY: {gp}")
+                    lines.append(f"   Expected Gap: {eemoji} {egap:+} pts")
                     lines.append("")
-                else:
-                    lines.append("⚠️ GIFT NIFTY available but NIFTY prev close missing.")
-            else:
-                lines.append("⚠️ GIFT NIFTY data unavailable")
         except Exception as e:
-            log.error(f"GIFT NIFTY error: {e}")
-            lines.append("⚠️ GIFT NIFTY data unavailable")
+            log.error(f"GIFT NIFTY: {e}")
 
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
         lines.append("⚠️ <i>Data may be delayed. For reference only.</i>")
 
-        msg = "\n".join(lines)
-        await ctx.bot.send_message(chat_id=CHANNEL_ID, text=msg, parse_mode="HTML")
-        log.info("✅ Pre-market update posted.")
+        await ctx.bot.send_message(chat_id=CHANNEL_ID, text="\n".join(lines), parse_mode="HTML")
+        log.info("✅ Pre-market posted")
 
     except Exception as e:
         log.error(f"Pre-market error: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# AUTO SCAN
+# AUTO SCAN (EVERY 1 MINUTE)
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def smart_scan(ctx: ContextTypes.DEFAULT_TYPE):
     if not is_market_open():
         return
-    log.info("🔍 Auto scan shuru...")
+    log.info("🔍 Auto scan (1 min)...")
     total = 0
     for name, cfg in INDICES.items():
         for sig in analyze_index(name, cfg):
             await post_to_channel(ctx.bot, sig)
             total += 1
             await asyncio.sleep(1)
-    log.info(f"🔍 Scan complete — {total} signals")
+    log.info(f"🔍 Scan done — {total} signals")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# COMMAND HANDLERS (private chat only)
+# COMMAND HANDLERS
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def safe_reply(update: Update, text: str, **kwargs):
-    """Private chat mein reply karo"""
     msg = update.effective_message
     if msg:
         try:
@@ -503,69 +479,45 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("❓ Help",            callback_data="help")],
     ])
     await safe_reply(update,
-        "🔔 <b>RUDRA SECURITIES BOT v5.1</b>\n\n"
+        "🔔 <b>RUDRA SECURITIES BOT v5.3</b>\n\n"
+        "⚡ Auto scan every 1 minute\n"
+        "✅ Score threshold: 2 (fast signals)\n"
         "✅ CE + PE dono side scan\n"
-        "✅ 15 rupees target\n"
-        "✅ Har 3 min auto scan\n"
         "✅ NIFTY | BANKNIFTY | SENSEX\n"
-        "✅ Channel mein auto post\n"
-        "✅ Daily 9:10 AM Pre-Market Update\n"
-        "🧪 Pehle /test karo — demo trade dekhne ke liye!\n\n"
-        "⚠️ <b>Note:</b> Commands sirf is private chat mein kaam\n"
-        "karti hain. Channel mein bot khud signal bhejta hai.",
+        "✅ Daily 9:10 AM Pre-Market\n\n"
+        "🧪 /test — demo trade",
         reply_markup=kb,
     )
 
 
 async def cmd_test(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """
-    /test — Demo trade dikhao + channel mein bhi post karo.
-    Market hours ki zarurat nahi — kab bhi kaam karta hai.
-    """
     msg = update.effective_message
     if not msg:
         return
 
-    # Random demo trade choose karo
     sig = random.choice(DEMO_TRADES).copy()
 
-    # Step 1: Private chat mein dikhao
     await msg.reply_html(
         "🧪 <b>TEST MODE — Demo Trade</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "Yeh ek demo trade hai — real signal nahi.\n"
         "Channel mein bhi post ho raha hai...\n"
     )
 
-    # Step 2: Channel mein post karo
     posted = await post_to_channel(ctx.bot, sig)
 
-    # Step 3: Result dikhao
     if posted:
         await msg.reply_html(
             format_alert(sig) + "\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "✅ <b>Channel mein post ho gaya!</b>\n"
-            "Ab apna channel check karo — wahan bhi yeh trade dikhega.\n\n"
-            "🟢 <b>Bot sahi kaam kar raha hai!</b>\n"
-            "Real signals automatically market hours mein aayenge."
+            "✅ <b>Channel mein post ho gaya!</b>"
         )
     else:
         await msg.reply_html(
             format_alert(sig) + "\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "⚠️ <b>Private chat mein toh aaya!</b>\n"
-            "Lekin channel post FAIL hua.\n\n"
-            "<b>Channel fix karne ke liye:</b>\n"
-            "1. Bot ko channel ka admin banao\n"
-            "2. Railway mein CHANNEL_ID check karo\n"
-            "   Format: <code>@channelname</code> ya <code>-100xxxxxxxxxx</code>\n"
-            "3. Bot ko channel mein add karke Admin rights do\n\n"
-            f"Current CHANNEL_ID: <code>{CHANNEL_ID or 'SET NAHI HAI!'}</code>"
+            "⚠️ Channel post FAIL.\n"
+            f"CHANNEL_ID: <code>{CHANNEL_ID or 'SET NAHI!'}</code>"
         )
-
-    log.info(f"Test command — demo trade: {sig['name']} {sig['direction']}, "
-             f"channel_posted={posted}")
 
 
 async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -578,14 +530,14 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not msg:
         return
 
-    wait = await msg.reply_text("⏳ Scanning NIFTY, BANKNIFTY, SENSEX — CE + PE dono...")
+    wait = await msg.reply_text("⏳ Scanning...")
     total = 0
 
     for name, cfg in INDICES.items():
         for sig in analyze_index(name, cfg):
             posted = await post_to_channel(ctx.bot, sig)
-            ch_txt = "✅ Channel post hua!" if posted else "⚠️ Channel post fail"
-            await msg.reply_html(format_alert(sig) + f"\n\n{ch_txt}")
+            ch_txt = "✅" if posted else "⚠️"
+            await msg.reply_html(format_alert(sig) + f"\n\nChannel: {ch_txt}")
             total += 1
             await asyncio.sleep(1)
 
@@ -595,11 +547,9 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await wait.edit_text(
             f"⚪ <b>Koi signal nahi mila</b>\n\n"
             f"Market: {mkt} | {now}\n\n"
-            f"Reasons:\n"
-            f"• Market sideways — clear trend nahi\n"
-            f"• Indicators align nahi kar rahe\n\n"
-            f"Bot har 3 min mein auto scan karta hai.\n"
-            f"Agar test karna ho: /test",
+            f"• Indicators align nahi hue\n"
+            f"• Next auto scan in 1 min\n\n"
+            f"/test — demo trade",
             parse_mode="HTML"
         )
     else:
@@ -615,36 +565,30 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ch  = CHANNEL_ID if CHANNEL_ID else "⚠️ SET NAHI HAI"
 
     await safe_reply(update,
-        f"📡 <b>Bot Status v5.1</b>\n\n"
+        f"📡 <b>Bot Status v5.3</b>\n\n"
         f"Market: {mkt}\n"
         f"🕐 {now}\n\n"
         f"📢 Channel: <code>{ch}</code>\n"
-        f"⏱ Auto Scan: Har 3 minute (market hours)\n"
+        f"⚡ Auto Scan: Har 1 minute\n"
         f"📊 Indices: NIFTY | BANKNIFTY | SENSEX\n"
         f"🎯 Target: ₹15 | SL: ₹10\n"
-        f"🌅 Pre‑Market Update: Daily 09:10 AM IST\n\n"
-        f"🧪 Test ke liye: /test"
+        f"📉 Score threshold: 2\n"
+        f"🌅 Pre‑Market: Daily 09:10 AM\n\n"
+        f"/test — demo trade"
     )
 
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await safe_reply(update,
         "📖 <b>RUDRA SECURITIES — Help</b>\n\n"
-        "<b>Commands (private chat mein):</b>\n"
-        "/start       — Bot info + buttons\n"
-        "/test        — Demo trade (channel mein bhi post)\n"
-        "/scan        — Manual scan (admin)\n"
-        "/status      — Bot + market status\n"
-        "/help        — Yeh message\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "⚠️ <b>Channel ke baare mein:</b>\n"
-        "Channel mein commands type karne se kuch nahi hoga.\n"
-        "Bot channel mein khud se signal post karta hai.\n"
-        "Commands sirf bot ke private chat mein kaam karti hain.\n\n"
-        "🌅 <b>Pre‑Market Update:</b> Daily 09:10 AM IST\n"
-        "NIFTY, BANKNIFTY, SENSEX ka kal ka summary +\n"
-        "NIFTY Expected Opening (GIFT NIFTY)\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "<b>Commands (private chat):</b>\n"
+        "/start   — Bot info + buttons\n"
+        "/test    — Demo trade\n"
+        "/scan    — Manual scan (admin)\n"
+        "/status  — Bot + market status\n"
+        "/help    — Yeh message\n\n"
+        "⚡ Auto scan: Every 1 minute\n"
+        "🌅 Daily 9:10 AM Pre-Market Update\n"
         "⚠️ <i>Educational purpose only.</i>"
     )
 
@@ -674,7 +618,7 @@ flask_app = Flask(__name__)
 
 @flask_app.route("/", methods=["GET"])
 def health():
-    return {"status": "ok", "version": "5.1"}, 200
+    return {"status": "ok", "version": "5.3"}, 200
 
 @flask_app.route("/webhook", methods=["POST"])
 def tv_webhook():
@@ -717,11 +661,10 @@ def main():
     if not BOT_TOKEN:
         raise SystemExit("❌ BOT_TOKEN missing!")
     if not CHANNEL_ID:
-        log.warning("⚠️  CHANNEL_ID set nahi hai — channel post nahi hoga!")
+        log.warning("⚠️  CHANNEL_ID set nahi hai!")
 
     tg_app = Application.builder().token(BOT_TOKEN).build()
 
-    # Command handlers
     tg_app.add_handler(CommandHandler("start",  cmd_start))
     tg_app.add_handler(CommandHandler("test",   cmd_test))
     tg_app.add_handler(CommandHandler("scan",   cmd_scan))
@@ -729,21 +672,19 @@ def main():
     tg_app.add_handler(CommandHandler("help",   cmd_help))
     tg_app.add_handler(CallbackQueryHandler(button_cb))
 
-    # Auto scan every 3 minutes
-    tg_app.job_queue.run_repeating(smart_scan, interval=180, first=15)
+    # ⚡ Auto scan every 1 minute (pehle 180 = 3 min tha)
+    tg_app.job_queue.run_repeating(smart_scan, interval=60, first=10)
 
-    # Pre-market update daily at 09:10 AM IST (Mon-Fri)
+    # Pre-market daily at 09:10 AM IST
     tg_app.job_queue.run_daily(
         pre_market_post,
         time=dtime(hour=9, minute=10, tzinfo=IST),
-        days=(0, 1, 2, 3, 4)   # Monday=0 to Friday=4
+        days=(0, 1, 2, 3, 4)
     )
 
-    # Flask server (for health / webhook)
     threading.Thread(target=run_flask, daemon=True).start()
     log.info(f"✅ Webhook port {PORT}")
-    log.info("✅ Rudra Securities Bot v5.1 — Live!")
-
+    log.info("✅ Rudra Securities Bot v5.3 — Live! (1 min scan)")
     tg_app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
