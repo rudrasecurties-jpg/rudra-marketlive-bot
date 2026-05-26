@@ -1,12 +1,13 @@
 """
-RUDRA SECURITIES — Indian Market Signal Bot v5.3
+RUDRA SECURITIES — Indian Market Signal Bot v5.4
 
-Changes v5.3:
-  • Auto scan interval reduced from 3 min → 1 min
-  • Score threshold = 2 (relaxed)
+Changes v5.4:
+  • Candlestick pattern detection (Doji, Hammer, Engulfing, etc.)
+  • Patterns add +2 to score
+  • Auto scan every 1 minute
+  • Score threshold = 2
   • Cooldown = 10 min per index+direction
   • Pre-Market Update daily 09:10 AM IST
-  • Simplified alert format
 """
 
 import logging, os, threading, asyncio
@@ -64,7 +65,6 @@ INDICES = {
     },
 }
 
-# Demo trades
 DEMO_TRADES = [
     {
         "name": "NIFTY", "direction": "CE",
@@ -72,7 +72,7 @@ DEMO_TRADES = [
         "price": 23847.5, "confidence": 82, "score": 6,
         "rsi": 38.4, "ema9": 23812.0, "ema21": 23798.0,
         "macd": 14.2, "vol_r": 1.6, "vwap": 23830.0, "atr": 45.0,
-        "reasons": ["RSI Oversold", "EMA Bullish", "MACD Positive"],
+        "reasons": ["RSI Oversold", "EMA Bullish", "MACD Positive", "🕯️ Hammer"],
         "demo": True,
     },
     {
@@ -81,7 +81,7 @@ DEMO_TRADES = [
         "price": 51523.0, "confidence": 78, "score": 5,
         "rsi": 64.7, "ema9": 51540.0, "ema21": 51560.0,
         "macd": -22.5, "vol_r": 1.8, "vwap": 51550.0, "atr": 88.0,
-        "reasons": ["RSI Overbought", "EMA Bearish", "MACD Negative"],
+        "reasons": ["RSI Overbought", "EMA Bearish", "MACD Negative", "🕯️ Shooting Star"],
         "demo": True,
     },
     {
@@ -114,6 +114,117 @@ def nearest_strike(price: float, step: int) -> int:
 
 def r2(x) -> float:
     return round(float(x), 2)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CANDLESTICK PATTERN DETECTION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def detect_candlestick_patterns(open_s, high_s, low_s, close_s, index: int = -1) -> list:
+    """
+    Detect candlestick patterns on the candle at given index.
+    Returns list of pattern names found.
+    """
+    if len(open_s) < abs(index) + 1:
+        return []
+
+    o = float(open_s.iloc[index])
+    h = float(high_s.iloc[index])
+    l = float(low_s.iloc[index])
+    c = float(close_s.iloc[index])
+
+    body   = abs(c - o)
+    range_ = h - l
+    upper_wick = h - max(c, o)
+    lower_wick = min(c, o) - l
+
+    # Avoid division by zero
+    if range_ == 0:
+        return []
+
+    body_ratio    = body / range_
+    upper_ratio   = upper_wick / range_ if range_ > 0 else 0
+    lower_ratio   = lower_wick / range_ if range_ > 0 else 0
+
+    is_bullish = c > o
+    is_bearish = c < o
+
+    # Previous candle for engulfing check
+    prev_bullish = False
+    prev_bearish = False
+    if len(open_s) >= abs(index) + 2:
+        po = float(open_s.iloc[index - 1])
+        pc = float(close_s.iloc[index - 1])
+        prev_bullish = pc > po
+        prev_bearish = pc < po
+
+    patterns = []
+
+    # ----- 1. DOJI -----
+    if body_ratio <= 0.1:
+        patterns.append("🕯️ Doji (Indecision)")
+
+    # ----- 2. Spinning Top -----
+    elif body_ratio <= 0.3 and upper_ratio >= 0.2 and lower_ratio >= 0.2:
+        patterns.append("🕯️ Spinning Top")
+
+    # ----- 3. Hammer (Bullish reversal) -----
+    if lower_ratio >= 0.6 and body_ratio <= 0.4 and lower_wick > body * 2:
+        patterns.append("🕯️ Hammer (Bullish Reversal)")
+
+    # ----- 4. Shooting Star (Bearish reversal) -----
+    if upper_ratio >= 0.6 and body_ratio <= 0.4 and upper_wick > body * 2:
+        patterns.append("🕯️ Shooting Star (Bearish Reversal)")
+
+    # ----- 5. Bullish Engulfing -----
+    if is_bullish and prev_bearish and c > float(open_s.iloc[index - 1]) and o < float(close_s.iloc[index - 1]):
+        patterns.append("🕯️ Bullish Engulfing")
+
+    # ----- 6. Bearish Engulfing -----
+    if is_bearish and prev_bullish and c < float(open_s.iloc[index - 1]) and o > float(close_s.iloc[index - 1]):
+        patterns.append("🕯️ Bearish Engulfing")
+
+    # ----- 7. Marubozu (Strong momentum) -----
+    if body_ratio >= 0.8 and upper_wick < body * 0.1 and lower_wick < body * 0.1:
+        if is_bullish:
+            patterns.append("🕯️ Bullish Marubozu (Strong)")
+        else:
+            patterns.append("🕯️ Bearish Marubozu (Strong)")
+
+    # ----- 8. Morning Star (3-candle pattern) -----
+    if len(open_s) >= abs(index) + 3:
+        c1 = float(close_s.iloc[index - 2])
+        o1 = float(open_s.iloc[index - 2])
+        c2 = float(close_s.iloc[index - 1])
+        o2 = float(open_s.iloc[index - 1])
+        c3 = float(close_s.iloc[index])
+        o3 = float(open_s.iloc[index])
+
+        # First candle bearish, second small body (doji/spinning), third bullish
+        first_bearish  = c1 < o1
+        second_small   = abs(c2 - o2) / (float(high_s.iloc[index - 1]) - float(low_s.iloc[index - 1]) + 0.001) <= 0.3
+        third_bullish  = c3 > o3 and c3 > (o1 + c1) / 2
+
+        if first_bearish and second_small and third_bullish:
+            patterns.append("🕯️ Morning Star (Bullish)")
+
+    # ----- 9. Evening Star (3-candle pattern) -----
+    if len(open_s) >= abs(index) + 3:
+        c1 = float(close_s.iloc[index - 2])
+        o1 = float(open_s.iloc[index - 2])
+        c2 = float(close_s.iloc[index - 1])
+        o2 = float(open_s.iloc[index - 1])
+        c3 = float(close_s.iloc[index])
+        o3 = float(open_s.iloc[index])
+
+        first_bullish  = c1 > o1
+        second_small   = abs(c2 - o2) / (float(high_s.iloc[index - 1]) - float(low_s.iloc[index - 1]) + 0.001) <= 0.3
+        third_bearish  = c3 < o3 and c3 < (o1 + c1) / 2
+
+        if first_bullish and second_small and third_bearish:
+            patterns.append("🕯️ Evening Star (Bearish)")
+
+    return patterns
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -170,7 +281,7 @@ def vwap_val(df: pd.DataFrame) -> float:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SIGNAL ENGINE (score threshold = 2, cooldown = 10 min)
+# SIGNAL ENGINE (WITH CANDLESTICK PATTERNS)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def analyze_index(name: str, cfg: dict) -> list[dict]:
@@ -191,6 +302,7 @@ def analyze_index(name: str, cfg: dict) -> list[dict]:
         df.columns = df.columns.get_level_values(0)
 
     close  = df["Close"].squeeze()
+    open_s = df["Open"].squeeze()
     high   = df["High"].squeeze()
     low    = df["Low"].squeeze()
     volume = df["Volume"].squeeze()
@@ -213,8 +325,15 @@ def analyze_index(name: str, cfg: dict) -> list[dict]:
     ema_bullish = ema9_v > ema21_v
     ema_bearish = ema9_v < ema21_v
 
+    # 🕯️ CANDLESTICK PATTERN DETECTION
+    candle_patterns = detect_candlestick_patterns(open_s, high, low, close, index=-1)
+    # Also check previous candle
+    prev_patterns = detect_candlestick_patterns(open_s, high, low, close, index=-2)
+
     log.info(f"{name} | Price={price} RSI={rsi_v} EMA9={ema9_v} EMA21={ema21_v} "
              f"MACD={macd_v} VolR={vol_r} VWAP={vwap_v} 5min%={r2(pct_5min)}%")
+    if candle_patterns:
+        log.info(f"  🕯️ Last candle patterns: {candle_patterns}")
 
     results = []
     for direction in ["CE", "PE"]:
@@ -222,7 +341,41 @@ def analyze_index(name: str, cfg: dict) -> list[dict]:
         score = 0
         reasons = []
 
-        # RSI
+        # ----- CANDLESTICK PATTERNS (scored first — +2 each) -----
+        bullish_patterns = [
+            "Hammer", "Bullish Engulfing", "Bullish Marubozu", "Morning Star"
+        ]
+        bearish_patterns = [
+            "Shooting Star", "Bearish Engulfing", "Bearish Marubozu", "Evening Star"
+        ]
+        neutral_patterns = ["Doji", "Spinning Top"]
+
+        for pat in candle_patterns:
+            if bull:
+                if any(bp in pat for bp in bullish_patterns):
+                    score += 2
+                    reasons.append(pat)
+                elif any(bp in pat for bp in neutral_patterns) and mom_up:
+                    score += 1
+                    reasons.append(pat)
+            else:
+                if any(bp in pat for bp in bearish_patterns):
+                    score += 2
+                    reasons.append(pat)
+                elif any(bp in pat for bp in neutral_patterns) and mom_down:
+                    score += 1
+                    reasons.append(pat)
+
+        # Previous candle pattern (secondary confirmation)
+        for pat in prev_patterns:
+            if bull and any(bp in pat for bp in bullish_patterns):
+                score += 1
+                reasons.append(f"Prev: {pat}")
+            elif not bull and any(bp in pat for bp in bearish_patterns):
+                score += 1
+                reasons.append(f"Prev: {pat}")
+
+        # ----- RSI -----
         if bull:
             if rsi_v < 40:    score += 2; reasons.append(f"RSI Oversold ({rsi_v})")
             elif rsi_v < 50:  score += 1; reasons.append(f"RSI Low ({rsi_v})")
@@ -230,7 +383,7 @@ def analyze_index(name: str, cfg: dict) -> list[dict]:
             if rsi_v > 60:    score += 2; reasons.append(f"RSI Overbought ({rsi_v})")
             elif rsi_v > 50:  score += 1; reasons.append(f"RSI High ({rsi_v})")
 
-        # EMA
+        # ----- EMA -----
         if bull and ema_bullish:
             if price > ema9_v:
                 score += 2; reasons.append("EMA Bullish + Price > EMA9")
@@ -242,35 +395,35 @@ def analyze_index(name: str, cfg: dict) -> list[dict]:
             else:
                 score += 1; reasons.append("EMA Bearish")
 
-        # MACD
+        # ----- MACD -----
         if bull and macd_v > 0:
             score += 1; reasons.append(f"MACD Positive ({macd_v})")
         elif not bull and macd_v < 0:
             score += 1; reasons.append(f"MACD Negative ({macd_v})")
 
-        # VWAP
+        # ----- VWAP -----
         if bull and price > vwap_v:
             score += 1; reasons.append(f"Price > VWAP ({vwap_v})")
         elif not bull and price < vwap_v:
             score += 1; reasons.append(f"Price < VWAP ({vwap_v})")
 
-        # Volume
+        # ----- Volume -----
         if vol_r >= 1.2:
             score += 1; reasons.append(f"Volume {vol_r}x")
 
-        # 3-candle momentum
+        # ----- 3-candle momentum -----
         if bull and mom_up:
             score += 2; reasons.append("3 Bullish Candles ↑")
         elif not bull and mom_down:
             score += 2; reasons.append("3 Bearish Candles ↓")
 
-        # 5-candle momentum
+        # ----- 5-candle momentum -----
         if bull and pct_5min > 0.15:
             score += 1; reasons.append(f"+{r2(pct_5min)}% in 5min")
         elif not bull and pct_5min < -0.15:
             score += 1; reasons.append(f"{r2(pct_5min)}% in 5min")
 
-        log.info(f"  {name} {direction}: score={score}/10 | reasons={len(reasons)}")
+        log.info(f"  {name} {direction}: score={score}/12 | reasons={len(reasons)}")
 
         if score < 2:
             continue
@@ -280,13 +433,13 @@ def analyze_index(name: str, cfg: dict) -> list[dict]:
         entry  = int(round(prem / 5) * 5)
         target = entry + cfg["target_pts"]
         sl     = entry - cfg["sl_pts"]
-        conf   = min(92, 45 + score * 7)
+        conf   = min(92, 45 + score * 6)
 
         key  = f"{name}_{direction}"
         last = last_signal.get(key)
         if last:
             diff = (datetime.now(IST) - last).total_seconds()
-            if diff < 600:  # 10 min cooldown
+            if diff < 600:
                 log.info(f"Cooldown skip: {key} ({int(diff)}s)")
                 continue
         last_signal[key] = datetime.now(IST)
@@ -346,7 +499,6 @@ def format_alert(sig: dict) -> str:
 
 async def post_to_channel(bot, sig: dict) -> bool:
     if not CHANNEL_ID:
-        log.warning("CHANNEL_ID set nahi hai!")
         return False
     try:
         await bot.send_message(
@@ -479,10 +631,11 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("❓ Help",            callback_data="help")],
     ])
     await safe_reply(update,
-        "🔔 <b>RUDRA SECURITIES BOT v5.3</b>\n\n"
+        "🔔 <b>RUDRA SECURITIES BOT v5.4</b>\n\n"
+        "🕯️ Candlestick Pattern Detection\n"
+        "   (Doji, Hammer, Engulfing, Star +)\n"
         "⚡ Auto scan every 1 minute\n"
-        "✅ Score threshold: 2 (fast signals)\n"
-        "✅ CE + PE dono side scan\n"
+        "✅ Score threshold: 2\n"
         "✅ NIFTY | BANKNIFTY | SENSEX\n"
         "✅ Daily 9:10 AM Pre-Market\n\n"
         "🧪 /test — demo trade",
@@ -530,7 +683,7 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not msg:
         return
 
-    wait = await msg.reply_text("⏳ Scanning...")
+    wait = await msg.reply_text("⏳ Scanning with candlestick patterns...")
     total = 0
 
     for name, cfg in INDICES.items():
@@ -547,7 +700,7 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await wait.edit_text(
             f"⚪ <b>Koi signal nahi mila</b>\n\n"
             f"Market: {mkt} | {now}\n\n"
-            f"• Indicators align nahi hue\n"
+            f"• Indicators + Patterns align nahi hue\n"
             f"• Next auto scan in 1 min\n\n"
             f"/test — demo trade",
             parse_mode="HTML"
@@ -565,14 +718,15 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ch  = CHANNEL_ID if CHANNEL_ID else "⚠️ SET NAHI HAI"
 
     await safe_reply(update,
-        f"📡 <b>Bot Status v5.3</b>\n\n"
+        f"📡 <b>Bot Status v5.4</b>\n\n"
         f"Market: {mkt}\n"
         f"🕐 {now}\n\n"
         f"📢 Channel: <code>{ch}</code>\n"
-        f"⚡ Auto Scan: Har 1 minute\n"
+        f"⚡ Auto Scan: Every 1 min\n"
+        f"🕯️ Patterns: Doji, Hammer, Engulfing +\n"
         f"📊 Indices: NIFTY | BANKNIFTY | SENSEX\n"
         f"🎯 Target: ₹15 | SL: ₹10\n"
-        f"📉 Score threshold: 2\n"
+        f"📉 Score threshold: 2/12\n"
         f"🌅 Pre‑Market: Daily 09:10 AM\n\n"
         f"/test — demo trade"
     )
@@ -587,6 +741,12 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/scan    — Manual scan (admin)\n"
         "/status  — Bot + market status\n"
         "/help    — Yeh message\n\n"
+        "🕯️ <b>Candlestick Patterns Detected:</b>\n"
+        "• Doji / Spinning Top\n"
+        "• Hammer / Shooting Star\n"
+        "• Bullish/Bearish Engulfing\n"
+        "• Marubozu\n"
+        "• Morning/Evening Star\n\n"
         "⚡ Auto scan: Every 1 minute\n"
         "🌅 Daily 9:10 AM Pre-Market Update\n"
         "⚠️ <i>Educational purpose only.</i>"
@@ -618,7 +778,7 @@ flask_app = Flask(__name__)
 
 @flask_app.route("/", methods=["GET"])
 def health():
-    return {"status": "ok", "version": "5.3"}, 200
+    return {"status": "ok", "version": "5.4"}, 200
 
 @flask_app.route("/webhook", methods=["POST"])
 def tv_webhook():
@@ -672,7 +832,7 @@ def main():
     tg_app.add_handler(CommandHandler("help",   cmd_help))
     tg_app.add_handler(CallbackQueryHandler(button_cb))
 
-    # ⚡ Auto scan every 1 minute (pehle 180 = 3 min tha)
+    # Auto scan every 1 minute
     tg_app.job_queue.run_repeating(smart_scan, interval=60, first=10)
 
     # Pre-market daily at 09:10 AM IST
@@ -684,7 +844,7 @@ def main():
 
     threading.Thread(target=run_flask, daemon=True).start()
     log.info(f"✅ Webhook port {PORT}")
-    log.info("✅ Rudra Securities Bot v5.3 — Live! (1 min scan)")
+    log.info("✅ Rudra Securities Bot v5.4 — Live! (Candlestick Patterns ON)")
     tg_app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
