@@ -1,11 +1,12 @@
 """
-RUDRA SECURITIES — Indian Market Signal Bot v5.0
+RUDRA SECURITIES — Indian Market Signal Bot v5.1
 
-Changes:
-  • /test command — demo trade private chat + channel dono mein
-  • Channel fix — bot channel mein SEND karta hai, commands private chat mein
-  • Sabhi commands private chat mein perfectly kaam karti hain
-  • /test sabse pehle kaam karega bina market hours ke bhi
+Changes v5.1:
+  • Pre-Market Update every 09:10 AM IST (NIFTY, BANKNIFTY, SENSEX)
+  • NIFTY Expected Opening via GIFT NIFTY
+  • Alert format simplified (only trade info + confidence + time + disclaimer)
+  • /test demo trade private + channel dono mein
+  • All commands work perfectly in private chat
 """
 
 import logging, os, threading, asyncio
@@ -303,8 +304,9 @@ def analyze_index(name: str, cfg: dict) -> list[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MESSAGE FORMAT
+# MESSAGE FORMAT (simplified with confidence + time + disclaimer)
 # ══════════════════════════════════════════════════════════════════════════════
+
 def format_alert(sig: dict) -> str:
     now   = datetime.now(IST).strftime("%d %b %Y | %I:%M %p")
     arrow = "📈" if sig["direction"] == "CE" else "📉"
@@ -335,6 +337,8 @@ def format_alert(sig: dict) -> str:
     )
 
     return header + "\n" + trade_info + "\n" + footer
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # CHANNEL POST
 # ══════════════════════════════════════════════════════════════════════════════
@@ -358,6 +362,109 @@ async def post_to_channel(bot, sig: dict) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# PRE‑MARKET UPDATE (Daily 09:10 AM IST)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def pre_market_post(ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    Daily 09:10 AM IST – Kal ka open/close/gap for NIFTY, BANKNIFTY, SENSEX
+    + NIFTY Expected Opening via GIFT NIFTY
+    """
+    if not CHANNEL_ID:
+        log.warning("Pre-market: CHANNEL_ID nahi hai")
+        return
+
+    today = datetime.now(IST)
+    if today.weekday() >= 5:
+        return  # Saturday/Sunday skip
+
+    try:
+        lines = [
+            "╔══════════════════════════╗",
+            "   📊 PRE‑MARKET UPDATE",
+            "╚══════════════════════════╝",
+            "",
+            f"📅 <b>{today.strftime('%d %b %Y')}</b>",
+            ""
+        ]
+
+        # Process each index
+        for name, cfg in INDICES.items():
+            try:
+                df = yf.download(cfg["yf"], period="5d", interval="1d",
+                                 progress=False, auto_adjust=True)
+                if df is None or len(df) < 3:
+                    lines.append(f"⚠️ {name}: Data unavailable")
+                    continue
+
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+
+                close_s = df["Close"].squeeze()
+                open_s  = df["Open"].squeeze()
+
+                yesterday_close = round(float(close_s.iloc[-2]), 2)
+                yesterday_open  = round(float(open_s.iloc[-2]), 2)
+                prev_close      = round(float(close_s.iloc[-3]), 2)
+                gap = round(yesterday_open - prev_close, 2)
+                dir_emoji = "🟢" if gap > 0 else "🔴" if gap < 0 else "⚪"
+
+                lines.append(f"━━━ {name} ━━━")
+                lines.append(f"   Open:  {yesterday_open:,.2f}")
+                lines.append(f"   Close: {yesterday_close:,.2f}")
+                lines.append(f"   Gap:   {dir_emoji} {gap:+} pts (vs prev close)")
+                lines.append("")
+            except Exception as e:
+                log.error(f"Pre-market {name} error: {e}")
+                lines.append(f"⚠️ {name}: Error fetching data")
+                lines.append("")
+
+        # GIFT NIFTY expected opening (only for NIFTY)
+        try:
+            gift = yf.Ticker("^GIFNIFTY")
+            info = gift.info
+            gift_price = info.get("regularMarketPrice") or info.get("previousClose")
+            if gift_price is not None:
+                gift_price = round(float(gift_price), 2)
+                # Use NIFTY yesterday close (last known) for expected gap
+                nifty_yc = None
+                for i, line in enumerate(lines):
+                    if "NIFTY" in line and i+3 < len(lines):
+                        # extract close from previous block (yesterday_close)
+                        pass
+                # Safer: fetch NIFTY's yesterday close again
+                nifty_df = yf.download("^NSEI", period="3d", interval="1d",
+                                       progress=False, auto_adjust=True)
+                if nifty_df is not None and len(nifty_df) >= 2:
+                    if isinstance(nifty_df.columns, pd.MultiIndex):
+                        nifty_df.columns = nifty_df.columns.get_level_values(0)
+                    nifty_yc = round(float(nifty_df["Close"].squeeze().iloc[-2]), 2)
+                    expected_gap = round(gift_price - nifty_yc, 2)
+                    exp_emoji = "🟢" if expected_gap > 0 else "🔴" if expected_gap < 0 else "⚪"
+                    lines.append("━━━ Today's Expected Opening (NIFTY) ━━━")
+                    lines.append(f"   GIFT NIFTY: {gift_price}")
+                    lines.append(f"   Expected Gap: {exp_emoji} {expected_gap:+} pts")
+                    lines.append("")
+                else:
+                    lines.append("⚠️ GIFT NIFTY available but NIFTY prev close missing.")
+            else:
+                lines.append("⚠️ GIFT NIFTY data unavailable")
+        except Exception as e:
+            log.error(f"GIFT NIFTY error: {e}")
+            lines.append("⚠️ GIFT NIFTY data unavailable")
+
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("⚠️ <i>Data may be delayed. For reference only.</i>")
+
+        msg = "\n".join(lines)
+        await ctx.bot.send_message(chat_id=CHANNEL_ID, text=msg, parse_mode="HTML")
+        log.info("✅ Pre-market update posted.")
+
+    except Exception as e:
+        log.error(f"Pre-market error: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # AUTO SCAN
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -375,9 +482,7 @@ async def smart_scan(ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# COMMAND HANDLERS
-# Note: Yeh sirf PRIVATE CHAT mein kaam karte hain.
-# Channel mein bot sirf SEND karta hai (receive nahi kar sakta).
+# COMMAND HANDLERS (private chat only)
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def safe_reply(update: Update, text: str, **kwargs):
@@ -398,12 +503,13 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("❓ Help",            callback_data="help")],
     ])
     await safe_reply(update,
-        "🔔 <b>RUDRA SECURITIES BOT v5.0</b>\n\n"
+        "🔔 <b>RUDRA SECURITIES BOT v5.1</b>\n\n"
         "✅ CE + PE dono side scan\n"
         "✅ 15 rupees target\n"
         "✅ Har 3 min auto scan\n"
         "✅ NIFTY | BANKNIFTY | SENSEX\n"
-        "✅ Channel mein auto post\n\n"
+        "✅ Channel mein auto post\n"
+        "✅ Daily 9:10 AM Pre-Market Update\n"
         "🧪 Pehle /test karo — demo trade dekhne ke liye!\n\n"
         "⚠️ <b>Note:</b> Commands sirf is private chat mein kaam\n"
         "karti hain. Channel mein bot khud signal bhejta hai.",
@@ -422,9 +528,6 @@ async def cmd_test(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # Random demo trade choose karo
     sig = random.choice(DEMO_TRADES).copy()
-
-    # Time update karo
-    now = datetime.now(IST).strftime("%d %b %Y | %I:%M %p")
 
     # Step 1: Private chat mein dikhao
     await msg.reply_html(
@@ -512,13 +615,14 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ch  = CHANNEL_ID if CHANNEL_ID else "⚠️ SET NAHI HAI"
 
     await safe_reply(update,
-        f"📡 <b>Bot Status v5.0</b>\n\n"
+        f"📡 <b>Bot Status v5.1</b>\n\n"
         f"Market: {mkt}\n"
         f"🕐 {now}\n\n"
         f"📢 Channel: <code>{ch}</code>\n"
         f"⏱ Auto Scan: Har 3 minute (market hours)\n"
         f"📊 Indices: NIFTY | BANKNIFTY | SENSEX\n"
-        f"🎯 Target: ₹15 | SL: ₹10\n\n"
+        f"🎯 Target: ₹15 | SL: ₹10\n"
+        f"🌅 Pre‑Market Update: Daily 09:10 AM IST\n\n"
         f"🧪 Test ke liye: /test"
     )
 
@@ -537,6 +641,9 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Channel mein commands type karne se kuch nahi hoga.\n"
         "Bot channel mein khud se signal post karta hai.\n"
         "Commands sirf bot ke private chat mein kaam karti hain.\n\n"
+        "🌅 <b>Pre‑Market Update:</b> Daily 09:10 AM IST\n"
+        "NIFTY, BANKNIFTY, SENSEX ka kal ka summary +\n"
+        "NIFTY Expected Opening (GIFT NIFTY)\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "⚠️ <i>Educational purpose only.</i>"
     )
@@ -567,7 +674,7 @@ flask_app = Flask(__name__)
 
 @flask_app.route("/", methods=["GET"])
 def health():
-    return {"status": "ok", "version": "5.0"}, 200
+    return {"status": "ok", "version": "5.1"}, 200
 
 @flask_app.route("/webhook", methods=["POST"])
 def tv_webhook():
@@ -614,19 +721,31 @@ def main():
 
     tg_app = Application.builder().token(BOT_TOKEN).build()
 
+    # Command handlers
     tg_app.add_handler(CommandHandler("start",  cmd_start))
-    tg_app.add_handler(CommandHandler("test",   cmd_test))   # NEW
+    tg_app.add_handler(CommandHandler("test",   cmd_test))
     tg_app.add_handler(CommandHandler("scan",   cmd_scan))
     tg_app.add_handler(CommandHandler("status", cmd_status))
     tg_app.add_handler(CommandHandler("help",   cmd_help))
     tg_app.add_handler(CallbackQueryHandler(button_cb))
 
+    # Auto scan every 3 minutes
     tg_app.job_queue.run_repeating(smart_scan, interval=180, first=15)
 
+    # Pre-market update daily at 09:10 AM IST (Mon-Fri)
+    tg_app.job_queue.run_daily(
+        pre_market_post,
+        time=dtime(hour=9, minute=10, tzinfo=IST),
+        days=(0, 1, 2, 3, 4)   # Monday=0 to Friday=4
+    )
+
+    # Flask server (for health / webhook)
     threading.Thread(target=run_flask, daemon=True).start()
     log.info(f"✅ Webhook port {PORT}")
-    log.info("✅ Rudra Securities Bot v5.0 — Live!")
+    log.info("✅ Rudra Securities Bot v5.1 — Live!")
+
     tg_app.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
     main()
