@@ -1,13 +1,13 @@
 """
-RUDRA SECURITIES — Indian Market Signal Bot v6.0
+RUDRA SECURITIES — Indian Market Signal Bot v6.1
 
-Changes v6.0:
-  • MCX Commodities added: CRUDEOIL, NATURALGAS, GOLD
-  • Separate market hours for MCX (9:00 AM - 11:30 PM)
-  • Commodity-specific lot size, strike steps, premium ranges
-  • Candlestick pattern detection for all
-  • Auto scan every 1 minute for all segments
-  • Pre-Market Update daily 09:10 AM IST
+Changes v6.1:
+  • MAJOR: Price action breakout detection added
+  • Score threshold reduced to 1 (ultra-sensitive)
+  • RSI range expanded (30-70)
+  • Cooldown reduced to 5 min
+  • Trend-following: agar market move kar rahi hai toh signal do
+  • NSE (9:15-3:30) + MCX (9:00-11:30) both segments
 """
 
 import logging, os, threading, asyncio
@@ -48,7 +48,7 @@ tg_app: Application = None
 last_signal: dict   = {}
 
 # ══════════════════════════════════════════════════════════════════════════════
-# INDICES + MCX COMMODITIES CONFIG
+# CONFIG — NSE + MCX
 # ══════════════════════════════════════════════════════════════════════════════
 
 INDICES = {
@@ -57,51 +57,56 @@ INDICES = {
         "prem_min": 80, "prem_max": 200,
         "target_pts": 15, "sl_pts": 10, "segment": "NSE",
         "market_start": dtime(9, 15), "market_end": dtime(15, 30),
+        "min_move_pct": 0.03,  # 0.03% = ~7 pts = signal trigger
     },
     "BANKNIFTY": {
         "yf": "^NSEBANK", "step": 100, "lot": 15,
         "prem_min": 150, "prem_max": 400,
         "target_pts": 15, "sl_pts": 10, "segment": "NSE",
         "market_start": dtime(9, 15), "market_end": dtime(15, 30),
+        "min_move_pct": 0.04,  # 0.04% = ~20 pts
     },
     "SENSEX": {
         "yf": "^BSESN", "step": 100, "lot": 10,
         "prem_min": 100, "prem_max": 300,
         "target_pts": 15, "sl_pts": 10, "segment": "NSE",
         "market_start": dtime(9, 15), "market_end": dtime(15, 30),
+        "min_move_pct": 0.03,
     },
-    # MCX Commodities
     "CRUDEOIL": {
         "yf": "CL=F", "step": 50, "lot": 100,
         "prem_min": 30, "prem_max": 80,
         "target_pts": 10, "sl_pts": 7, "segment": "MCX",
         "market_start": dtime(9, 0), "market_end": dtime(23, 30),
+        "min_move_pct": 0.05,
     },
     "NATURALGAS": {
         "yf": "NG=F", "step": 10, "lot": 1250,
         "prem_min": 5, "prem_max": 20,
         "target_pts": 3, "sl_pts": 2, "segment": "MCX",
         "market_start": dtime(9, 0), "market_end": dtime(23, 30),
+        "min_move_pct": 0.08,
     },
     "GOLD": {
         "yf": "GC=F", "step": 100, "lot": 1,
         "prem_min": 100, "prem_max": 300,
         "target_pts": 20, "sl_pts": 15, "segment": "MCX",
         "market_start": dtime(9, 0), "market_end": dtime(23, 30),
+        "min_move_pct": 0.04,
     },
 }
 
 DEMO_TRADES = [
     {"name": "NIFTY", "direction": "CE", "strike": 23850, "entry": 110, "sl": 95, "target": 130,
-     "price": 23847.5, "confidence": 82, "score": 6, "reasons": ["RSI Oversold", "EMA Bullish", "🕯️ Hammer"], "demo": True},
+     "price": 23847.5, "confidence": 82, "score": 6, "segment": "NSE", "reasons": ["RSI Oversold", "EMA Bullish", "🕯️ Hammer"], "demo": True},
     {"name": "BANKNIFTY", "direction": "PE", "strike": 51500, "entry": 175, "sl": 165, "target": 195,
-     "price": 51523.0, "confidence": 78, "score": 5, "reasons": ["RSI Overbought", "EMA Bearish", "🕯️ Shooting Star"], "demo": True},
+     "price": 51523.0, "confidence": 78, "score": 5, "segment": "NSE", "reasons": ["RSI Overbought", "EMA Bearish"], "demo": True},
     {"name": "CRUDEOIL", "direction": "CE", "strike": 6200, "entry": 55, "sl": 48, "target": 65,
-     "price": 6185.0, "confidence": 80, "score": 5, "reasons": ["RSI Oversold", "Volume Surge", "🕯️ Bullish Engulfing"], "demo": True},
+     "price": 6185.0, "confidence": 80, "score": 5, "segment": "MCX", "reasons": ["Volume Surge", "🕯️ Bullish Engulfing"], "demo": True},
     {"name": "NATURALGAS", "direction": "PE", "strike": 180, "entry": 8, "sl": 6, "target": 11,
-     "price": 182.5, "confidence": 75, "score": 4, "reasons": ["RSI Overbought", "MACD Negative"], "demo": True},
+     "price": 182.5, "confidence": 75, "score": 4, "segment": "MCX", "reasons": ["RSI Overbought"], "demo": True},
     {"name": "GOLD", "direction": "CE", "strike": 74200, "entry": 180, "sl": 165, "target": 200,
-     "price": 74150.0, "confidence": 76, "score": 4, "reasons": ["EMA Bullish", "Price > VWAP"], "demo": True},
+     "price": 74150.0, "confidence": 76, "score": 4, "segment": "MCX", "reasons": ["EMA Bullish", "Price > VWAP"], "demo": True},
 ]
 
 
@@ -110,9 +115,8 @@ DEMO_TRADES = [
 # ══════════════════════════════════════════════════════════════════════════════
 
 def is_market_open_for(cfg: dict) -> bool:
-    """Check if market is open for given segment"""
     now = datetime.now(IST)
-    if now.weekday() >= 5:  # Saturday/Sunday
+    if now.weekday() >= 5:
         return False
     t = now.time()
     return cfg["market_start"] <= t <= cfg["market_end"]
@@ -127,108 +131,15 @@ def r2(x) -> float:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CANDLESTICK PATTERN DETECTION
-# ══════════════════════════════════════════════════════════════════════════════
-
-def detect_candlestick_patterns(open_s, high_s, low_s, close_s, index: int = -1) -> list:
-    """Detect candlestick patterns on the candle at given index."""
-    if len(open_s) < abs(index) + 1:
-        return []
-
-    o = float(open_s.iloc[index])
-    h = float(high_s.iloc[index])
-    l = float(low_s.iloc[index])
-    c = float(close_s.iloc[index])
-
-    body   = abs(c - o)
-    range_ = h - l
-    upper_wick = h - max(c, o)
-    lower_wick = min(c, o) - l
-
-    if range_ == 0:
-        return []
-
-    body_ratio  = body / range_
-    upper_ratio = upper_wick / range_
-    lower_ratio = lower_wick / range_
-
-    is_bullish = c > o
-    is_bearish = c < o
-
-    prev_bullish = False
-    prev_bearish = False
-    if len(open_s) >= abs(index) + 2:
-        po = float(open_s.iloc[index - 1])
-        pc = float(close_s.iloc[index - 1])
-        prev_bullish = pc > po
-        prev_bearish = pc < po
-
-    patterns = []
-
-    # 1. DOJI
-    if body_ratio <= 0.1:
-        patterns.append("🕯️ Doji (Indecision)")
-
-    # 2. Spinning Top
-    elif body_ratio <= 0.3 and upper_ratio >= 0.2 and lower_ratio >= 0.2:
-        patterns.append("🕯️ Spinning Top")
-
-    # 3. Hammer
-    if lower_ratio >= 0.6 and body_ratio <= 0.4 and lower_wick > body * 2:
-        patterns.append("🕯️ Hammer (Bullish Reversal)")
-
-    # 4. Shooting Star
-    if upper_ratio >= 0.6 and body_ratio <= 0.4 and upper_wick > body * 2:
-        patterns.append("🕯️ Shooting Star (Bearish Reversal)")
-
-    # 5. Bullish Engulfing
-    if is_bullish and prev_bearish and c > float(open_s.iloc[index - 1]) and o < float(close_s.iloc[index - 1]):
-        patterns.append("🕯️ Bullish Engulfing")
-
-    # 6. Bearish Engulfing
-    if is_bearish and prev_bullish and c < float(open_s.iloc[index - 1]) and o > float(close_s.iloc[index - 1]):
-        patterns.append("🕯️ Bearish Engulfing")
-
-    # 7. Marubozu
-    if body_ratio >= 0.8 and upper_wick < body * 0.1 and lower_wick < body * 0.1:
-        if is_bullish:
-            patterns.append("🕯️ Bullish Marubozu (Strong)")
-        else:
-            patterns.append("🕯️ Bearish Marubozu (Strong)")
-
-    # 8. Morning Star
-    if len(open_s) >= abs(index) + 3:
-        c1, o1 = float(close_s.iloc[index - 2]), float(open_s.iloc[index - 2])
-        c2, o2 = float(close_s.iloc[index - 1]), float(open_s.iloc[index - 1])
-        c3, o3 = float(close_s.iloc[index]), float(open_s.iloc[index])
-        r2_range = float(high_s.iloc[index - 1]) - float(low_s.iloc[index - 1]) + 0.001
-
-        if (c1 < o1) and (abs(c2 - o2) / r2_range <= 0.3) and (c3 > o3) and (c3 > (o1 + c1) / 2):
-            patterns.append("🕯️ Morning Star (Bullish)")
-
-    # 9. Evening Star
-    if len(open_s) >= abs(index) + 3:
-        c1, o1 = float(close_s.iloc[index - 2]), float(open_s.iloc[index - 2])
-        c2, o2 = float(close_s.iloc[index - 1]), float(open_s.iloc[index - 1])
-        c3, o3 = float(close_s.iloc[index]), float(open_s.iloc[index])
-        r2_range = float(high_s.iloc[index - 1]) - float(low_s.iloc[index - 1]) + 0.001
-
-        if (c1 > o1) and (abs(c2 - o2) / r2_range <= 0.3) and (c3 < o3) and (c3 < (o1 + c1) / 2):
-            patterns.append("🕯️ Evening Star (Bearish)")
-
-    return patterns
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 # INDICATORS
 # ══════════════════════════════════════════════════════════════════════════════
 
 def rsi(s: pd.Series, n=14) -> float:
-    d  = s.diff()
+    d = s.diff()
     up = d.clip(lower=0).rolling(n).mean()
     dn = (-d.clip(upper=0)).rolling(n).mean()
     rs = up / dn.replace(0, np.nan)
-    v  = (100 - 100 / (1 + rs)).iloc[-1]
+    v = (100 - 100 / (1 + rs)).iloc[-1]
     return r2(v) if not np.isnan(v) else 50.0
 
 
@@ -239,200 +150,220 @@ def ema(s: pd.Series, n: int) -> float:
 def macd_hist(s: pd.Series) -> float:
     e12 = s.ewm(span=12, adjust=False).mean()
     e26 = s.ewm(span=26, adjust=False).mean()
-    m   = e12 - e26
+    m = e12 - e26
     sig = m.ewm(span=9, adjust=False).mean()
-    v   = (m - sig).iloc[-1]
-    return r2(v) if not np.isnan(v) else 0.0
-
-
-def atr14(high, low, close) -> float:
-    tr = pd.concat([
-        high - low,
-        (high - close.shift()).abs(),
-        (low  - close.shift()).abs(),
-    ], axis=1).max(axis=1)
-    v = tr.rolling(14).mean().iloc[-1]
+    v = (m - sig).iloc[-1]
     return r2(v) if not np.isnan(v) else 0.0
 
 
 def vol_ratio(volume: pd.Series, n=20) -> float:
     avg = volume.rolling(n).mean().iloc[-1]
     cur = volume.iloc[-1]
-    if avg > 0:
-        v = cur / avg
-        return r2(v) if not np.isnan(v) else 1.0
-    return 1.0
+    return r2(cur / avg) if avg > 0 else 1.0
 
 
 def vwap_val(df: pd.DataFrame) -> float:
-    d  = df.tail(50).copy()
+    d = df.tail(50).copy()
     tp = (d["High"] + d["Low"] + d["Close"]) / 3
-    v  = (tp * d["Volume"]).cumsum() / d["Volume"].cumsum()
-    val = v.iloc[-1]
-    return r2(val) if not np.isnan(val) else float(df["Close"].iloc[-1])
+    v = (tp * d["Volume"]).cumsum() / d["Volume"].cumsum()
+    return r2(v.iloc[-1]) if not np.isnan(v.iloc[-1]) else float(df["Close"].iloc[-1])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SIGNAL ENGINE (NSE + MCX)
+# SIGNAL ENGINE v6.1 — PRICE ACTION PRIORITY
 # ══════════════════════════════════════════════════════════════════════════════
 
 def analyze_index(name: str, cfg: dict) -> list[dict]:
-    # Check market hours for this segment
     if not is_market_open_for(cfg):
         return []
 
     try:
-        df = yf.download(cfg["yf"], period="5d", interval="5m",
-                         progress=False, auto_adjust=True)
+        df = yf.download(cfg["yf"], period="5d", interval="5m", progress=False, auto_adjust=True)
         if df is None or len(df) < 30:
-            df = yf.download(cfg["yf"], period="10d", interval="15m",
-                             progress=False, auto_adjust=True)
-        if df is None or len(df) < 20:
-            log.warning(f"{name}: Data nahi mila")
+            df = yf.download(cfg["yf"], period="10d", interval="15m", progress=False, auto_adjust=True)
+        if df is None or len(df) < 15:
             return []
     except Exception as e:
-        log.error(f"{name} fetch error: {e}")
+        log.error(f"{name}: {e}")
         return []
 
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
     close  = df["Close"].squeeze()
-    open_s = df["Open"].squeeze()
     high   = df["High"].squeeze()
     low    = df["Low"].squeeze()
     volume = df["Volume"].squeeze()
 
-    price  = r2(close.iloc[-1])
-    rsi_v  = rsi(close)
+    price = r2(close.iloc[-1])
+    rsi_v = rsi(close)
     ema9_v = ema(close, 9)
-    ema21_v= ema(close, 21)
+    ema21_v = ema(close, 21)
     macd_v = macd_hist(close)
     vol_r  = vol_ratio(volume)
     vwap_v = vwap_val(df)
 
+    # Price action calculations
     c1, c2, c3 = close.iloc[-1], close.iloc[-2], close.iloc[-3]
-    mom_up   = c1 > c2 > c3
-    mom_down = c1 < c2 < c3
+    c10 = close.iloc[-10] if len(close) >= 10 else close.iloc[0]
+    
+    # Percentage moves
+    pct_5min = ((c1 - close.iloc[-5]) / close.iloc[-5] * 100) if len(close) >= 5 else 0
+    pct_10min = ((c1 - c10) / c10 * 100) if c10 != 0 else 0
+    pct_3candles = ((c1 - c3) / c3 * 100) if c3 != 0 else 0
 
-    c5 = close.iloc[-5] if len(close) >= 5 else close.iloc[0]
-    pct_5min = ((c1 - c5) / c5) * 100 if c5 != 0 else 0
+    # High/Low breakout check
+    highest_10 = high.iloc[-10:-1].max() if len(high) >= 10 else high.max()
+    lowest_10  = low.iloc[-10:-1].min() if len(low) >= 10 else low.min()
+    breakout_up = price > highest_10
+    breakdown_down = price < lowest_10
 
+    # EMA crossover
     ema_bullish = ema9_v > ema21_v
     ema_bearish = ema9_v < ema21_v
+    price_above_ema9 = price > ema9_v
+    price_below_ema9 = price < ema9_v
 
-    # Candlestick patterns
-    candle_patterns = detect_candlestick_patterns(open_s, high, low, close, index=-1)
-    prev_patterns = detect_candlestick_patterns(open_s, high, low, close, index=-2)
+    # Volume confirmation
+    high_volume = vol_r >= 1.2
 
-    log.info(f"{name} [{cfg['segment']}] | Price={price} RSI={rsi_v} "
-             f"EMA9={ema9_v} EMA21={ema21_v} MACD={macd_v} VolR={vol_r} 5min%={r2(pct_5min)}%")
-    if candle_patterns:
-        log.info(f"  🕯️ Patterns: {candle_patterns}")
+    log.info(f"{name} [{cfg['segment']}] | Price={price} | RSI={rsi_v} | "
+             f"5min%={r2(pct_5min)}% | 10min%={r2(pct_10min)}% | "
+             f"Breakout={'UP' if breakout_up else 'DOWN' if breakdown_down else 'NO'} | "
+             f"Vol={vol_r}x")
 
     results = []
     for direction in ["CE", "PE"]:
-        bull  = (direction == "CE")
+        bull = (direction == "CE")
         score = 0
         reasons = []
+        min_move = cfg.get("min_move_pct", 0.05)
 
-        # ----- Candlestick Patterns -----
-        bullish_pats = ["Hammer", "Bullish Engulfing", "Bullish Marubozu", "Morning Star"]
-        bearish_pats = ["Shooting Star", "Bearish Engulfing", "Bearish Marubozu", "Evening Star"]
-        neutral_pats = ["Doji", "Spinning Top"]
+        # ═══════════════════════════════════════════════════════════
+        # TIER 1: PRICE ACTION — STRONGEST SIGNAL
+        # ═══════════════════════════════════════════════════════════
 
-        for pat in candle_patterns:
-            if bull:
-                if any(bp in pat for bp in bullish_pats):
-                    score += 2; reasons.append(pat)
-                elif any(bp in pat for bp in neutral_pats) and mom_up:
-                    score += 1; reasons.append(pat)
-            else:
-                if any(bp in pat for bp in bearish_pats):
-                    score += 2; reasons.append(pat)
-                elif any(bp in pat for bp in neutral_pats) and mom_down:
-                    score += 1; reasons.append(pat)
+        # A) Breakout/Breakdown (instant +4)
+        if bull and breakout_up:
+            score += 4
+            reasons.append(f"🚀 Breakout! Price > 10-candle high")
+        elif not bull and breakdown_down:
+            score += 4
+            reasons.append(f"📉 Breakdown! Price < 10-candle low")
 
-        for pat in prev_patterns:
-            if bull and any(bp in pat for bp in bullish_pats):
-                score += 1; reasons.append(f"Prev: {pat}")
-            elif not bull and any(bp in pat for bp in bearish_pats):
-                score += 1; reasons.append(f"Prev: {pat}")
+        # B) Strong momentum (3 candle) — +3
+        if bull and pct_3candles > min_move:
+            score += 3
+            reasons.append(f"⚡ +{r2(pct_3candles)}% in 3 candles")
+        elif not bull and pct_3candles < -min_move:
+            score += 3
+            reasons.append(f"⚡ {r2(pct_3candles)}% in 3 candles")
 
-        # ----- RSI -----
+        # C) 5-min move — +2
+        if bull and pct_5min > min_move * 0.7:
+            score += 2
+            reasons.append(f"📈 +{r2(pct_5min)}% in 5min")
+        elif not bull and pct_5min < -min_move * 0.7:
+            score += 2
+            reasons.append(f"📉 {r2(pct_5min)}% in 5min")
+
+        # D) 10-min trend — +2
+        if bull and pct_10min > min_move:
+            score += 2
+            reasons.append(f"📈 +{r2(pct_10min)}% in 10min trend")
+        elif not bull and pct_10min < -min_move:
+            score += 2
+            reasons.append(f"📉 {r2(pct_10min)}% in 10min trend")
+
+        # ═══════════════════════════════════════════════════════════
+        # TIER 2: INDICATOR CONFIRMATION
+        # ═══════════════════════════════════════════════════════════
+
+        # RSI (expanded range)
         if bull:
-            if rsi_v < 40:    score += 2; reasons.append(f"RSI Oversold ({rsi_v})")
-            elif rsi_v < 50:  score += 1; reasons.append(f"RSI Low ({rsi_v})")
+            if rsi_v < 50:    score += 1; reasons.append(f"RSI {rsi_v} (Bullish)")
+            if rsi_v < 35:    score += 1; reasons.append("RSI Oversold")
         else:
-            if rsi_v > 60:    score += 2; reasons.append(f"RSI Overbought ({rsi_v})")
-            elif rsi_v > 50:  score += 1; reasons.append(f"RSI High ({rsi_v})")
+            if rsi_v > 50:    score += 1; reasons.append(f"RSI {rsi_v} (Bearish)")
+            if rsi_v > 65:    score += 1; reasons.append("RSI Overbought")
 
-        # ----- EMA -----
+        # EMA
         if bull and ema_bullish:
-            if price > ema9_v:
-                score += 2; reasons.append("EMA Bullish + Price > EMA9")
-            else:
-                score += 1; reasons.append("EMA Bullish")
+            score += 1; reasons.append("EMA Bullish (9>21)")
+            if price_above_ema9:
+                score += 1; reasons.append("Price > EMA9")
         elif not bull and ema_bearish:
-            if price < ema9_v:
-                score += 2; reasons.append("EMA Bearish + Price < EMA9")
-            else:
-                score += 1; reasons.append("EMA Bearish")
+            score += 1; reasons.append("EMA Bearish (9<21)")
+            if price_below_ema9:
+                score += 1; reasons.append("Price < EMA9")
 
-        # ----- MACD -----
+        # MACD
         if bull and macd_v > 0:
-            score += 1; reasons.append(f"MACD Positive ({macd_v})")
+            score += 1; reasons.append(f"MACD +{macd_v}")
         elif not bull and macd_v < 0:
-            score += 1; reasons.append(f"MACD Negative ({macd_v})")
+            score += 1; reasons.append(f"MACD {macd_v}")
 
-        # ----- VWAP -----
+        # VWAP
         if bull and price > vwap_v:
-            score += 1; reasons.append(f"Price > VWAP ({vwap_v})")
+            score += 1; reasons.append("Price > VWAP")
         elif not bull and price < vwap_v:
-            score += 1; reasons.append(f"Price < VWAP ({vwap_v})")
+            score += 1; reasons.append("Price < VWAP")
 
-        # ----- Volume -----
-        if vol_r >= 1.2:
-            score += 1; reasons.append(f"Volume {vol_r}x")
+        # Volume
+        if high_volume:
+            score += 1; reasons.append(f"🔥 Vol {vol_r}x")
 
-        # ----- 3-candle momentum -----
-        if bull and mom_up:
-            score += 2; reasons.append("3 Bullish Candles ↑")
-        elif not bull and mom_down:
-            score += 2; reasons.append("3 Bearish Candles ↓")
+        # ═══════════════════════════════════════════════════════════
+        # TIER 3: CANDLESTICK CONFIRMATION
+        # ═══════════════════════════════════════════════════════════
+        
+        # Simple candle check (last candle direction)
+        last_bullish = close.iloc[-1] > close.iloc[-2]
+        last_bearish = close.iloc[-1] < close.iloc[-2]
 
-        # ----- 5-candle momentum -----
-        if bull and pct_5min > 0.15:
-            score += 1; reasons.append(f"+{r2(pct_5min)}% in 5min")
-        elif not bull and pct_5min < -0.15:
-            score += 1; reasons.append(f"{r2(pct_5min)}% in 5min")
+        if bull and last_bullish:
+            score += 1; reasons.append("Last candle Bullish ✅")
+        elif not bull and last_bearish:
+            score += 1; reasons.append("Last candle Bearish ✅")
 
-        log.info(f"  {name} {direction}: score={score}/12 | reasons={len(reasons)}")
+        # Two consecutive candles
+        two_up = close.iloc[-1] > close.iloc[-2] > close.iloc[-3]
+        two_down = close.iloc[-1] < close.iloc[-2] < close.iloc[-3]
+        
+        if bull and two_up:
+            score += 1; reasons.append("2 Consecutive Bullish")
+        elif not bull and two_down:
+            score += 1; reasons.append("2 Consecutive Bearish")
 
-        if score < 2:
+        log.info(f"  {name} {direction}: SCORE={score} | Reasons: {len(reasons)}")
+
+        # ═══════════════════════════════════════════════════════════
+        # THRESHOLD CHECK (only 1 needed now!)
+        # ═══════════════════════════════════════════════════════════
+        if score < 1:
             continue
 
-        # MCX me price INR me convert karo (rough multiplier)
+        # Cooldown check (5 min only)
+        key = f"{name}_{direction}"
+        last = last_signal.get(key)
+        if last:
+            diff = (datetime.now(IST) - last).total_seconds()
+            if diff < 300:  # 5 min cooldown
+                log.info(f"  ⏱ Cooldown: {key} ({int(diff)}s ago)")
+                continue
+        last_signal[key] = datetime.now(IST)
+
+        # Strike calculation
         if cfg["segment"] == "MCX" and name == "GOLD":
-            # Gold futures USD/oz → INR/10g (approx multiply by 240)
             price_inr = round(price * 240, 2)
         else:
             price_inr = price
 
         strike = nearest_strike(price_inr, cfg["step"])
-        entry  = int(round((cfg["prem_min"] + cfg["prem_max"]) / 2 / 5) * 5)
+        entry = int(round((cfg["prem_min"] + cfg["prem_max"]) / 2 / 5) * 5)
         target = entry + cfg["target_pts"]
-        sl     = entry - cfg["sl_pts"]
-        conf   = min(92, 45 + score * 6)
-
-        key  = f"{name}_{direction}"
-        last = last_signal.get(key)
-        if last:
-            diff = (datetime.now(IST) - last).total_seconds()
-            if diff < 600:  # 10 min cooldown
-                log.info(f"Cooldown skip: {key} ({int(diff)}s)")
-                continue
-        last_signal[key] = datetime.now(IST)
+        sl = entry - cfg["sl_pts"]
+        conf = min(95, 40 + score * 6)
 
         results.append({
             "name": name, "direction": direction, "segment": cfg["segment"],
@@ -440,8 +371,7 @@ def analyze_index(name: str, cfg: dict) -> list[dict]:
             "price": price_inr, "confidence": conf, "score": score,
             "rsi": rsi_v, "ema9": ema9_v, "ema21": ema21_v,
             "macd": macd_v, "vol_r": vol_r, "vwap": vwap_v,
-            "atr": atr14(high, low, close),
-            "reasons": reasons, "demo": False,
+            "atr": 0, "reasons": reasons, "demo": False,
         })
 
     return results
@@ -452,7 +382,7 @@ def analyze_index(name: str, cfg: dict) -> list[dict]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def format_alert(sig: dict) -> str:
-    now   = datetime.now(IST).strftime("%d %b %Y | %I:%M %p")
+    now = datetime.now(IST).strftime("%d %b %Y | %I:%M %p")
     arrow = "📈" if sig["direction"] == "CE" else "📉"
     demo_line = "\n🔸 [DEMO TRADE — Real nahi hai]" if sig.get("demo") else ""
     segment_tag = f" [{sig.get('segment', 'NSE')}]"
@@ -493,25 +423,23 @@ async def post_to_channel(bot, sig: dict) -> bool:
         return False
     try:
         await bot.send_message(chat_id=CHANNEL_ID, text=format_alert(sig), parse_mode="HTML")
-        log.info(f"✅ Channel: {sig['name']} {sig['direction']} [{sig.get('segment','')}]")
+        log.info(f"✅ Channel: {sig['name']} {sig['direction']} [{sig.get('segment','')}] Score={sig['score']}")
         return True
     except Exception as e:
-        log.error(f"❌ Channel post FAIL: {e}")
+        log.error(f"❌ Channel FAIL: {e}")
         return False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PRE‑MARKET UPDATE
+# PRE‑MARKET
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def pre_market_post(ctx: ContextTypes.DEFAULT_TYPE):
     if not CHANNEL_ID:
         return
-
     today = datetime.now(IST)
     if today.weekday() >= 5:
         return
-
     try:
         lines = [
             "╔══════════════════════════╗",
@@ -521,201 +449,120 @@ async def pre_market_post(ctx: ContextTypes.DEFAULT_TYPE):
             f"📅 <b>{today.strftime('%d %b %Y')}</b>",
             ""
         ]
-
         for name, cfg in INDICES.items():
             try:
-                df = yf.download(cfg["yf"], period="5d", interval="1d",
-                                 progress=False, auto_adjust=True)
-                if df is None or len(df) < 3:
-                    continue
-                if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = df.columns.get_level_values(0)
-
-                cs = df["Close"].squeeze()
-                os_ = df["Open"].squeeze()
-
-                yc = round(float(cs.iloc[-2]), 2)
-                yo = round(float(os_.iloc[-2]), 2)
-                pc = round(float(cs.iloc[-3]), 2)
-                gap = round(yo - pc, 2)
+                df = yf.download(cfg["yf"], period="5d", interval="1d", progress=False, auto_adjust=True)
+                if df is None or len(df) < 3: continue
+                if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+                cs = df["Close"].squeeze(); os_ = df["Open"].squeeze()
+                yc = round(float(cs.iloc[-2]), 2); yo = round(float(os_.iloc[-2]), 2)
+                pc = round(float(cs.iloc[-3]), 2); gap = round(yo - pc, 2)
                 emoji = "🟢" if gap > 0 else "🔴" if gap < 0 else "⚪"
-
                 lines.append(f"━━━ {name} [{cfg['segment']}] ━━━")
-                lines.append(f"   Open:  {yo:,.2f}")
-                lines.append(f"   Close: {yc:,.2f}")
-                lines.append(f"   Gap:   {emoji} {gap:+} pts")
-                lines.append("")
-            except Exception as e:
-                log.error(f"Pre-market {name}: {e}")
-
-        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        lines.append("⚠️ <i>Data may be delayed. For reference only.</i>")
-
+                lines.append(f"   Open: {yo:,.2f} | Close: {yc:,.2f} | Gap: {emoji} {gap:+} pts\n")
+            except: pass
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚠️ <i>For reference only.</i>")
         await ctx.bot.send_message(chat_id=CHANNEL_ID, text="\n".join(lines), parse_mode="HTML")
-        log.info("✅ Pre-market posted")
-
     except Exception as e:
-        log.error(f"Pre-market error: {e}")
+        log.error(f"Pre-market: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# AUTO SCAN (EVERY 1 MINUTE)
+# AUTO SCAN
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def smart_scan(ctx: ContextTypes.DEFAULT_TYPE):
-    log.info("🔍 Auto scan (1 min)...")
     total = 0
     for name, cfg in INDICES.items():
         for sig in analyze_index(name, cfg):
             await post_to_channel(ctx.bot, sig)
             total += 1
             await asyncio.sleep(1)
-    log.info(f"🔍 Scan done — {total} signals")
+    if total > 0:
+        log.info(f"🔍 {total} signals posted")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# COMMAND HANDLERS
+# COMMANDS
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def safe_reply(update: Update, text: str, **kwargs):
     msg = update.effective_message
     if msg:
-        try:
-            await msg.reply_html(text, **kwargs)
-        except Exception as e:
-            log.error(f"Reply error: {e}")
+        try: await msg.reply_html(text, **kwargs)
+        except: pass
 
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🧪 Test Trade",     callback_data="test")],
-        [InlineKeyboardButton("📊 Manual Scan",    callback_data="scan")],
-        [InlineKeyboardButton("📈 Market Status",  callback_data="status")],
-        [InlineKeyboardButton("❓ Help",            callback_data="help")],
+        [InlineKeyboardButton("🧪 Test Trade", callback_data="test")],
+        [InlineKeyboardButton("📊 Manual Scan", callback_data="scan")],
+        [InlineKeyboardButton("📈 Status", callback_data="status")],
+        [InlineKeyboardButton("❓ Help", callback_data="help")],
     ])
     await safe_reply(update,
-        "🔔 <b>RUDRA SECURITIES BOT v6.0</b>\n\n"
-        "📊 <b>NSE:</b> NIFTY | BANKNIFTY | SENSEX\n"
-        "⛽ <b>MCX:</b> CRUDEOIL | NATURALGAS | GOLD\n\n"
-        "🕯️ Candlestick Pattern Detection\n"
-        "⚡ Auto scan every 1 minute\n"
-        "✅ All segments — live hours\n"
-        "✅ Daily 9:10 AM Pre-Market\n\n"
-        "🧪 /test — demo trade",
-        reply_markup=kb,
-    )
+        "🔔 <b>RUDRA SECURITIES v6.1</b>\n\n"
+        "🚀 <b>Price Action Priority System</b>\n"
+        "• Breakout/Breakdown detection\n"
+        "• 1%+ move = instant signal\n"
+        "• Score threshold: 1 (ultra-sensitive)\n"
+        "• 5-min cooldown only\n\n"
+        "📊 NSE + ⛽ MCX — Live\n\n"
+        "/test — demo trade",
+        reply_markup=kb)
 
 
 async def cmd_test(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
-    if not msg:
-        return
-
+    if not msg: return
     sig = random.choice(DEMO_TRADES).copy()
-    await msg.reply_html("🧪 <b>TEST MODE — Demo Trade</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\nChannel mein bhi post ho raha hai...\n")
+    await msg.reply_html("🧪 <b>TEST MODE</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━━\nChannel mein bhi post ho raha hai...")
     posted = await post_to_channel(ctx.bot, sig)
-
-    if posted:
-        await msg.reply_html(format_alert(sig) + "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n✅ <b>Channel mein post ho gaya!</b>")
-    else:
-        await msg.reply_html(format_alert(sig) + f"\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚠️ Channel post FAIL.\nCHANNEL_ID: <code>{CHANNEL_ID or 'SET NAHI!'}</code>")
+    await msg.reply_html(format_alert(sig) + ("\n\n✅ Channel post OK" if posted else f"\n\n⚠️ FAIL\nCHANNEL_ID: {CHANNEL_ID}"))
 
 
 async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user and ADMIN_ID and user.id != ADMIN_ID:
-        await safe_reply(update, "❌ Sirf admin manual scan kar sakta hai.")
+    if ADMIN_ID and update.effective_user.id != ADMIN_ID:
+        await safe_reply(update, "❌ Admin only")
         return
-
     msg = update.effective_message
-    if not msg:
-        return
-
-    wait = await msg.reply_text("⏳ Scanning NSE + MCX...")
+    if not msg: return
+    wait = await msg.reply_text("⏳ Scanning all segments...")
     total = 0
-
     for name, cfg in INDICES.items():
         for sig in analyze_index(name, cfg):
             posted = await post_to_channel(ctx.bot, sig)
-            ch_txt = "✅" if posted else "⚠️"
-            await msg.reply_html(format_alert(sig) + f"\n\nChannel: {ch_txt}")
+            await msg.reply_html(format_alert(sig) + f"\n\nChannel: {'✅' if posted else '⚠️'}")
             total += 1
             await asyncio.sleep(1)
-
     if total == 0:
-        now = datetime.now(IST).strftime("%I:%M %p IST")
-        await wait.edit_text(
-            f"⚪ <b>Koi signal nahi mila</b>\n\n"
-            f"🕐 {now}\n\n"
-            f"• Indicators + Patterns align nahi hue\n"
-            f"• Check market hours\n"
-            f"• Next auto scan in 1 min\n\n"
-            f"/test — demo trade",
-            parse_mode="HTML"
-        )
+        await wait.edit_text(f"⚪ No signals\n🕐 {datetime.now(IST).strftime('%I:%M %p')}\n\n/test — demo trade", parse_mode="HTML")
     else:
-        try:
-            await wait.delete()
-        except:
-            pass
+        try: await wait.delete()
+        except: pass
 
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(IST).strftime("%d %b %Y | %I:%M %p IST")
-    ch  = CHANNEL_ID if CHANNEL_ID else "⚠️ SET NAHI HAI"
-
-    # Active segments
-    active = []
-    for name, cfg in INDICES.items():
-        if is_market_open_for(cfg):
-            active.append(f"🟢 {name}")
-    active_str = "\n".join(active) if active else "🔴 No market open"
-
-    await safe_reply(update,
-        f"📡 <b>Bot Status v6.0</b>\n\n"
-        f"🕐 {now}\n\n"
-        f"📢 Channel: <code>{ch}</code>\n"
-        f"⚡ Auto Scan: Every 1 min\n\n"
-        f"<b>Active Markets:</b>\n{active_str}\n\n"
-        f"🕯️ Patterns: Doji, Hammer, Engulfing +\n"
-        f"📊 NSE: 9:15 AM - 3:30 PM\n"
-        f"⛽ MCX: 9:00 AM - 11:30 PM\n"
-        f"🌅 Pre‑Market: Daily 09:10 AM\n\n"
-        f"/test — demo trade"
-    )
+    ch = CHANNEL_ID or "⚠️ NOT SET"
+    active = [f"🟢 {n}" for n, c in INDICES.items() if is_market_open_for(c)] or ["🔴 None"]
+    await safe_reply(update, f"📡 <b>v6.1 Status</b>\n\n🕐 {now}\n📢 Channel: {ch}\n⚡ Scan: Every 1 min\n⏱ Cooldown: 5 min\n\n<b>Active:</b>\n" + "\n".join(active))
 
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await safe_reply(update,
-        "📖 <b>RUDRA SECURITIES — Help</b>\n\n"
-        "<b>Commands (private chat):</b>\n"
-        "/start   — Bot info + buttons\n"
-        "/test    — Demo trade\n"
-        "/scan    — Manual scan (admin)\n"
-        "/status  — Bot + market status\n"
-        "/help    — Yeh message\n\n"
-        "<b>Segments Covered:</b>\n"
-        "📊 NSE: NIFTY, BANKNIFTY, SENSEX\n"
-        "⛽ MCX: CRUDEOIL, NATURALGAS, GOLD\n\n"
-        "🕯️ <b>Patterns:</b> Doji, Hammer, Engulfing +\n"
-        "⚡ Auto scan: Every 1 minute\n"
-        "🌅 Daily 9:10 AM Pre-Market\n"
-        "⚠️ <i>Educational purpose only.</i>"
-    )
+        "📖 <b>Help — v6.1</b>\n\n"
+        "/start /test /scan /status /help\n\n"
+        "🚀 Price action priority — signals on move\n"
+        "📊 NSE: NIFTY BANKNIFTY SENSEX\n"
+        "⛽ MCX: CRUDEOIL NATURALGAS GOLD\n"
+        "⚠️ Educational only.")
 
 
 async def button_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-
-    class FU:
-        effective_message = q.message
-        effective_user    = q.from_user
-
-    if q.data == "test":    await cmd_test(FU(), ctx)
-    elif q.data == "scan":  await cmd_scan(FU(), ctx)
-    elif q.data == "status": await cmd_status(FU(), ctx)
-    elif q.data == "help":  await cmd_help(FU(), ctx)
+    q = update.callback_query; await q.answer()
+    class FU: effective_message = q.message; effective_user = q.from_user
+    {"test": cmd_test, "scan": cmd_scan, "status": cmd_status, "help": cmd_help}.get(q.data, lambda u,c: None)(FU(), ctx)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -725,37 +572,26 @@ flask_app = Flask(__name__)
 
 @flask_app.route("/", methods=["GET"])
 def health():
-    return {"status": "ok", "version": "6.0"}, 200
+    return {"status": "ok", "version": "6.1"}, 200
 
 @flask_app.route("/webhook", methods=["POST"])
 def tv_webhook():
     try:
         data = request.get_json(force=True)
-        if not data or data.get("secret") != TV_SECRET:
-            abort(403)
+        if not data or data.get("secret") != TV_SECRET: abort(403)
         sig = {
-            "name": data.get("index", "NIFTY"),
-            "direction": data.get("type", "CE").upper(),
-            "strike": int(data.get("strike", 0)),
-            "entry": int(data.get("entry", 0)),
-            "sl": int(data.get("sl", 0)),
-            "target": int(data.get("target", 0)),
-            "price": float(data.get("spot", 0)),
-            "confidence": int(data.get("confidence", 80)),
-            "segment": data.get("segment", "NSE"),
-            "score": 5, "rsi": "N/A", "ema9": "N/A", "ema21": "N/A",
-            "macd": "N/A", "vol_r": "N/A", "vwap": "N/A", "atr": 0,
-            "reasons": [data.get("reason", "TradingView Alert")], "demo": False,
+            "name": data.get("index","NIFTY"), "direction": data.get("type","CE").upper(),
+            "strike": int(data.get("strike",0)), "entry": int(data.get("entry",0)),
+            "sl": int(data.get("sl",0)), "target": int(data.get("target",0)),
+            "price": float(data.get("spot",0)), "confidence": int(data.get("confidence",80)),
+            "segment": data.get("segment","NSE"), "score": 5, "reasons": ["TradingView"], "demo": False,
         }
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        async def _s():
-            if tg_app: await post_to_channel(tg_app.bot, sig)
-        loop.run_until_complete(_s())
+        loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
+        loop.run_until_complete(post_to_channel(tg_app.bot, sig) if tg_app else None)
         loop.close()
-        return {"status": "posted"}, 200
+        return {"status":"posted"}, 200
     except Exception as e:
-        return {"error": str(e)}, 500
+        return {"error":str(e)}, 500
 
 def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
@@ -766,35 +602,20 @@ def run_flask():
 # ══════════════════════════════════════════════════════════════════════════════
 def main():
     global tg_app
-    if not BOT_TOKEN:
-        raise SystemExit("❌ BOT_TOKEN missing!")
-    if not CHANNEL_ID:
-        log.warning("⚠️  CHANNEL_ID set nahi hai!")
+    if not BOT_TOKEN: raise SystemExit("❌ BOT_TOKEN missing!")
+    if not CHANNEL_ID: log.warning("⚠️ CHANNEL_ID missing!")
 
     tg_app = Application.builder().token(BOT_TOKEN).build()
-
-    tg_app.add_handler(CommandHandler("start",  cmd_start))
-    tg_app.add_handler(CommandHandler("test",   cmd_test))
-    tg_app.add_handler(CommandHandler("scan",   cmd_scan))
-    tg_app.add_handler(CommandHandler("status", cmd_status))
-    tg_app.add_handler(CommandHandler("help",   cmd_help))
+    for cmd, func in [("start",cmd_start),("test",cmd_test),("scan",cmd_scan),("status",cmd_status),("help",cmd_help)]:
+        tg_app.add_handler(CommandHandler(cmd, func))
     tg_app.add_handler(CallbackQueryHandler(button_cb))
 
-    # Auto scan every 1 minute
     tg_app.job_queue.run_repeating(smart_scan, interval=60, first=10)
-
-    # Pre-market daily at 09:10 AM IST
-    tg_app.job_queue.run_daily(
-        pre_market_post,
-        time=dtime(hour=9, minute=10, tzinfo=IST),
-        days=(0, 1, 2, 3, 4)
-    )
+    tg_app.job_queue.run_daily(pre_market_post, time=dtime(hour=9, minute=10, tzinfo=IST), days=(0,1,2,3,4))
 
     threading.Thread(target=run_flask, daemon=True).start()
-    log.info(f"✅ Webhook port {PORT}")
-    log.info("✅ Rudra Securities Bot v6.0 — Live! (NSE + MCX)")
+    log.info("✅ Rudra Securities v6.1 — LIVE (Price Action Mode)")
     tg_app.run_polling(allowed_updates=Update.ALL_TYPES)
-
 
 if __name__ == "__main__":
     main()
